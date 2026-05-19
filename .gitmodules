@@ -1,0 +1,14 @@
+[submodule "thirdparty/jemalloc"]
+	path = thirdparty/jemalloc
+	url = git@github.com:jemalloc/jemalloc.git
+	branch = dev
+
+[submodule "thirdparty/libco"]
+	path = thirdparty/libco
+	url = git@github.com:Torstan/libco.git
+	branch = master
+
+[submodule "thirdparty/cpp_util"]
+	path = thirdparty/cpp_util
+	url = git@github.com:Torstan/cpp_util.git
+	branch = main
