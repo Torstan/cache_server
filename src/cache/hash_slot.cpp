@@ -1,9 +1,32 @@
 #include "cache/hash_slot.h"
 
+#include <limits>
 #include <string>
 #include <utility>
 
 namespace cache {
+namespace {
+
+constexpr std::uint64_t kMicrosPerSecond = 1'000'000ULL;
+
+std::uint64_t SaturatingTtlUs(std::int64_t seconds) {
+  const std::uint64_t seconds_u = static_cast<std::uint64_t>(seconds);
+  if (seconds_u >
+      std::numeric_limits<std::uint64_t>::max() / kMicrosPerSecond) {
+    return std::numeric_limits<std::uint64_t>::max();
+  }
+  return seconds_u * kMicrosPerSecond;
+}
+
+std::uint64_t SaturatingDeadlineUs(std::uint64_t now_us,
+                                   std::uint64_t ttl_us) {
+  if (ttl_us > std::numeric_limits<std::uint64_t>::max() - now_us) {
+    return std::numeric_limits<std::uint64_t>::max();
+  }
+  return now_us + ttl_us;
+}
+
+}  // namespace
 
 WriteResult HashSlot::SetString(std::string_view key, std::string_view value,
                                 std::uint64_t now_us) {
@@ -114,8 +137,11 @@ bool HashSlot::Expire(std::string_view key, std::int64_t seconds,
   }
 
   const PackedString packed_key(key);
-  const std::uint64_t deadline_us =
-      now_us + static_cast<std::uint64_t>(seconds) * 1'000'000ULL;
+  std::uint64_t ttl_us = SaturatingTtlUs(seconds);
+  const std::uint64_t deadline_us = SaturatingDeadlineUs(now_us, ttl_us);
+  if (deadline_us == std::numeric_limits<std::uint64_t>::max()) {
+    ttl_us = deadline_us - now_us;
+  }
 
   std::lock_guard<std::mutex> write_lock(write_mutex_);
   const std::uint64_t next_seq = slot_seq_ + 1;
@@ -134,6 +160,7 @@ bool HashSlot::Expire(std::string_view key, std::int64_t seconds,
   record.seq = next_seq;
   record.op = BinlogOp::kExpire;
   record.args = {"EXPIRE", std::string(key), std::to_string(seconds)};
+  record.remaining_ttl_us = ttl_us;
 
   binlog_buffer_.Append(std::move(record));
   slot_seq_ = next_seq;
