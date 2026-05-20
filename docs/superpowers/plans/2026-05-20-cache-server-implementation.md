@@ -1493,7 +1493,7 @@ int main(int argc, char** argv) {
 }
 ```
 
-- [ ] **Step 5: Run server smoke test manually**
+- [x] **Step 5: Run server smoke test manually**
 
 Run: `cmake --build build -j`
 
@@ -1515,7 +1515,7 @@ $1
 
 The literal RESP bytes are `+OK\r\n$1\r\n1\r\n`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/net/server.h src/net/server.cpp src/main.cpp tests/integration_resp_test.cpp
@@ -1528,7 +1528,7 @@ git commit -m "net: add libco redis protocol server"
 - Create: `bench/run_single_worker_qps.sh`
 - Modify: `docs/superpowers/plans/2026-05-20-cache-server-implementation.md`
 
-- [ ] **Step 1: Add benchmark script**
+- [x] **Step 1: Add benchmark script**
 
 Create `bench/run_single_worker_qps.sh`:
 
@@ -1549,7 +1549,7 @@ redis-benchmark -h 127.0.0.1 -p "${port}" -n "${requests}" -t set,get -P 64 -q
 
 Run: `chmod +x bench/run_single_worker_qps.sh`
 
-- [ ] **Step 2: Run full verification**
+- [x] **Step 2: Run full verification**
 
 Run:
 
@@ -1561,7 +1561,7 @@ cd build && ctest --output-on-failure
 
 Expected: build succeeds and `cache_tests` passes.
 
-- [ ] **Step 3: Run optional thread sanitizer build**
+- [x] **Step 3: Run optional thread sanitizer build**
 
 Run:
 
@@ -1573,7 +1573,7 @@ cd build-tsan && ctest --output-on-failure
 
 Expected: tests pass without thread sanitizer reports.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add bench/run_single_worker_qps.sh docs/superpowers/plans/2026-05-20-cache-server-implementation.md
@@ -1592,6 +1592,18 @@ Spec coverage:
 - Custom RESP replication, resume, slave apply ordering, and 50 ms ACK semantics are covered by Tasks 8-9.
 - Libco worker model is covered by Task 10.
 - Benchmarks and final verification are covered by Task 11.
+
+Final verification run on 2026-05-20:
+
+- `cmake -S . -B build`
+- `cmake --build build -j`
+- `ctest --output-on-failure` from `build`
+- `cmake -S . -B build-tsan -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"`
+- `cmake --build build-tsan -j`
+- `ctest --output-on-failure` from `build-tsan`
+- `./build/cache_server 6381 2 128` plus a local RESP `SET`/`GET` smoke test
+- `./build/cache_server 6382 1 64` plus `./bench/run_single_worker_qps.sh 6382 10`
+- `git diff --check`
 
 Execution notes:
 

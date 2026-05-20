@@ -157,6 +157,10 @@ Each `HashSlot` stores:
 ImtMap<PackedString, RedisObject, std::less<PackedString>, AtomicRefCount>
 ```
 
+When slot-level logic needs to traverse the whole key/object map, it must use
+`ImtMap::ForEach` on an `ObjectMap` snapshot. The cache layer should not depend
+on lower-level `ImmutableTree` or `ImmutableBlockTree` internals for this map.
+
 Payload representation:
 
 - String: `PackedString`
