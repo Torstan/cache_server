@@ -19,6 +19,7 @@ class SlaveReplicator {
   void ApplyLogForTest(std::size_t slot_id, const cache::BinlogRecord& record,
                        std::uint64_t now_us);
   std::uint64_t AppliedSeqForTest(std::size_t slot_id) const;
+  std::size_t WorkerForSlotForTest(std::size_t slot_id) const;
 
  private:
   struct SlotApplyState {
@@ -28,13 +29,18 @@ class SlaveReplicator {
 
   void ApplyLog(std::size_t slot_id, const cache::BinlogRecord& record,
                 std::uint64_t now_us);
+  void ApplyLogOnWorker(std::size_t worker_id, std::size_t slot_id,
+                        const cache::BinlogRecord& record,
+                        std::uint64_t now_us);
   bool ApplyRecord(const cache::BinlogRecord& record, std::uint64_t now_us);
+  std::size_t WorkerForSlot(std::size_t slot_id) const;
   SlotApplyState& StateForSlot(std::size_t slot_id);
   const SlotApplyState* FindStateForSlot(std::size_t slot_id) const;
 
   cache::CacheEngine* engine_;
   std::size_t apply_workers_;
   std::vector<SlotApplyState> slot_states_;
+  std::vector<std::size_t> slot_worker_;
 };
 
 }  // namespace repl

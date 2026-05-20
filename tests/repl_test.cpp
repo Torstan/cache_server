@@ -60,6 +60,8 @@ CACHE_TEST(SlaveApplyHoldsOutOfOrderLogsUntilGapFilled) {
   seq1.args = {"SET", "k", "v1"};
 
   const std::size_t slot = common::SlotForKey("k");
+  test::Require(slave.WorkerForSlotForTest(slot) == slot % 4,
+                "slot is routed to deterministic apply worker");
   slave.ApplyLogForTest(slot, seq2, 1000);
   test::Require(engine.GetString("k", 1000).status == cache::Status::kNotFound,
                 "seq2 waits for seq1");

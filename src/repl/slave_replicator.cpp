@@ -28,15 +28,19 @@ SlaveReplicator::SlaveReplicator(cache::CacheEngine* engine,
                                  std::size_t apply_workers)
     : engine_(engine),
       apply_workers_(apply_workers == 0 ? 1 : apply_workers),
-      slot_states_(engine == nullptr ? 0 : engine->SlotCount()) {}
+      slot_states_(engine == nullptr ? 0 : engine->SlotCount()),
+      slot_worker_(engine == nullptr ? 0 : engine->SlotCount(), 0) {
+  for (std::size_t slot_id = 0; slot_id < slot_worker_.size(); ++slot_id) {
+    slot_worker_[slot_id] = WorkerForSlot(slot_id);
+  }
+}
 
 void SlaveReplicator::EnqueueFrame(Frame frame) {
   if (frame.subcmd != Subcmd::kLog) {
     return;
   }
-  const std::size_t worker = frame.slot_id % apply_workers_;
-  (void)worker;
-  ApplyLog(frame.slot_id, frame.record, ApplyNowUs());
+  ApplyLogOnWorker(WorkerForSlot(frame.slot_id), frame.slot_id, frame.record,
+                   ApplyNowUs());
 }
 
 void SlaveReplicator::ApplyLogForTest(std::size_t slot_id,
@@ -50,9 +54,25 @@ std::uint64_t SlaveReplicator::AppliedSeqForTest(std::size_t slot_id) const {
   return state == nullptr ? 0 : state->applied_seq;
 }
 
+std::size_t SlaveReplicator::WorkerForSlotForTest(std::size_t slot_id) const {
+  return WorkerForSlot(slot_id);
+}
+
 void SlaveReplicator::ApplyLog(std::size_t slot_id,
                                const cache::BinlogRecord& record,
                                std::uint64_t now_us) {
+  ApplyLogOnWorker(WorkerForSlot(slot_id), slot_id, record, now_us);
+}
+
+void SlaveReplicator::ApplyLogOnWorker(std::size_t worker_id,
+                                       std::size_t slot_id,
+                                       const cache::BinlogRecord& record,
+                                       std::uint64_t now_us) {
+  if (slot_id >= slot_worker_.size()) {
+    throw std::out_of_range("slot id out of range");
+  }
+  slot_worker_[slot_id] = worker_id;
+
   SlotApplyState& state = StateForSlot(slot_id);
   if (record.seq <= state.applied_seq) {
     return;
@@ -127,6 +147,10 @@ bool SlaveReplicator::ApplyRecord(const cache::BinlogRecord& record,
   }
 
   return false;
+}
+
+std::size_t SlaveReplicator::WorkerForSlot(std::size_t slot_id) const {
+  return slot_id % apply_workers_;
 }
 
 SlaveReplicator::SlotApplyState& SlaveReplicator::StateForSlot(
