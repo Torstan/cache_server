@@ -4,6 +4,7 @@
 #include <limits>
 
 #include "cache/cache_engine.h"
+#include "command/command_dispatcher.h"
 #include "command/hash_cmd.h"
 #include "command/key_cmd.h"
 #include "command/set_cmd.h"
@@ -159,4 +160,56 @@ CACHE_TEST(HashSetAndZSetCommandsMatchRedisSubset) {
   test::RequireEqual(
       command::ZScoreCmd("z", "m").ExecCmd(engine, now_us).text, "2.5",
       "ZSCORE returns score");
+}
+
+CACHE_TEST(CommandDispatcherParsesAndExecutesRespArgs) {
+  cache::CacheEngine engine;
+  command::CommandDispatcher dispatcher;
+  const std::uint64_t now_us = 1000;
+
+  auto set = dispatcher.Execute({"set", "a", "1"}, engine, now_us);
+  test::RequireEqual(set.text, "OK", "dispatcher executes SET");
+
+  auto get = dispatcher.Execute({"GET", "a"}, engine, now_us);
+  test::RequireEqual(get.text, "1", "dispatcher executes GET");
+
+  auto hset = dispatcher.Execute({"HSET", "h", "f", "v"}, engine, now_us);
+  test::Require(hset.integer == 1, "dispatcher executes HSET");
+  auto hget = dispatcher.Execute({"hget", "h", "f"}, engine, now_us);
+  test::RequireEqual(hget.text, "v", "dispatcher executes HGET");
+
+  auto sadd = dispatcher.Execute({"SADD", "s", "m"}, engine, now_us);
+  test::Require(sadd.integer == 1, "dispatcher executes SADD");
+  auto sismember = dispatcher.Execute({"SISMEMBER", "s", "m"}, engine, now_us);
+  test::Require(sismember.integer == 1, "dispatcher executes SISMEMBER");
+
+  auto zadd = dispatcher.Execute({"ZADD", "z", "1.5", "m"}, engine, now_us);
+  test::Require(zadd.integer == 1, "dispatcher executes ZADD");
+  auto zscore = dispatcher.Execute({"ZSCORE", "z", "m"}, engine, now_us);
+  test::RequireEqual(zscore.text, "1.5", "dispatcher executes ZSCORE");
+
+  auto expire = dispatcher.Execute({"EXPIRE", "a", "2"}, engine, now_us);
+  test::Require(expire.integer == 1, "dispatcher parses EXPIRE integer");
+  auto ttl = dispatcher.Execute({"TTL", "a"}, engine, now_us);
+  test::Require(ttl.integer == 2, "dispatcher executes TTL");
+  auto del = dispatcher.Execute({"DEL", "a"}, engine, now_us);
+  test::Require(del.integer == 1, "dispatcher executes DEL");
+
+  auto wrong_arity = dispatcher.Execute({"GET"}, engine, now_us);
+  test::Require(wrong_arity.type == protocol::ResponseType::kError,
+                "wrong arity returns error");
+
+  auto invalid_score = dispatcher.Execute({"ZADD", "z", "nan", "m"}, engine,
+                                          now_us);
+  test::Require(invalid_score.type == protocol::ResponseType::kError,
+                "invalid score returns error");
+
+  auto invalid_integer = dispatcher.Execute({"EXPIRE", "a", "oops"}, engine,
+                                            now_us);
+  test::Require(invalid_integer.type == protocol::ResponseType::kError,
+                "invalid integer returns error");
+
+  auto unknown = dispatcher.Execute({"NOPE", "a"}, engine, now_us);
+  test::Require(unknown.type == protocol::ResponseType::kError,
+                "unknown command returns error");
 }
