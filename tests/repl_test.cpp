@@ -4,6 +4,7 @@
 #include "redis/resp.h"
 #include "repl/master_replicator.h"
 #include "repl/repl_frame.h"
+#include "repl/slave_replicator.h"
 
 CACHE_TEST(ReplFrameRoundTripsLog) {
   cache::BinlogRecord record;
@@ -42,4 +43,30 @@ CACHE_TEST(ReplFrameRejectsMalformedAckCount) {
 
   test::Require(!repl::DecodeFrame(wire).has_value(),
                 "malformed ACK count is rejected");
+}
+
+CACHE_TEST(SlaveApplyHoldsOutOfOrderLogsUntilGapFilled) {
+  cache::CacheEngine engine;
+  repl::SlaveReplicator slave(&engine, 4);
+
+  cache::BinlogRecord seq2;
+  seq2.seq = 2;
+  seq2.op = cache::BinlogOp::kSet;
+  seq2.args = {"SET", "k", "v2"};
+
+  cache::BinlogRecord seq1;
+  seq1.seq = 1;
+  seq1.op = cache::BinlogOp::kSet;
+  seq1.args = {"SET", "k", "v1"};
+
+  const std::size_t slot = common::SlotForKey("k");
+  slave.ApplyLogForTest(slot, seq2, 1000);
+  test::Require(engine.GetString("k", 1000).status == cache::Status::kNotFound,
+                "seq2 waits for seq1");
+
+  slave.ApplyLogForTest(slot, seq1, 1000);
+  auto read = engine.GetString("k", 1000);
+  test::Require(read.status == cache::Status::kOk, "key exists after gap fill");
+  test::RequireEqual(read.value, "v2", "pending seq2 applies after seq1");
+  test::Require(slave.AppliedSeqForTest(slot) == 2, "applied seq advances");
 }
