@@ -1,0 +1,36 @@
+cmake_minimum_required(VERSION 3.16)
+project(cache_server LANGUAGES C CXX ASM)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+option(CACHE_SERVER_USE_JEMALLOC "Link bundled jemalloc when available" OFF)
+
+add_subdirectory(thirdparty/libco)
+
+file(GLOB_RECURSE CACHE_CORE_SRCS CONFIGURE_DEPENDS src/*.cpp)
+list(FILTER CACHE_CORE_SRCS EXCLUDE REGEX ".*/main\\.cpp$")
+add_library(cache_core STATIC ${CACHE_CORE_SRCS})
+
+target_include_directories(cache_core PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/cpp_util/redis/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/cpp_util/immutable_container/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/libco
+)
+
+target_link_libraries(cache_core PUBLIC colib_static pthread dl)
+
+file(GLOB CACHE_TEST_SRCS CONFIGURE_DEPENDS tests/*_test.cpp)
+add_executable(cache_tests tests/test_harness.cpp ${CACHE_TEST_SRCS})
+target_link_libraries(cache_tests PRIVATE cache_core)
+target_include_directories(cache_tests PRIVATE tests)
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
+  add_executable(cache_server src/main.cpp)
+  target_link_libraries(cache_server PRIVATE cache_core)
+endif()
+
+enable_testing()
+add_test(NAME cache_tests COMMAND cache_tests)
