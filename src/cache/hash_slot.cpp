@@ -1,0 +1,117 @@
+#include "cache/hash_slot.h"
+
+#include <utility>
+
+namespace cache {
+
+WriteResult HashSlot::SetString(std::string_view key, std::string_view value,
+                                std::uint64_t now_us) {
+  (void)now_us;
+  const PackedString packed_key(key);
+  const RedisObject object = RedisObject::MakeString(value);
+
+  std::lock_guard<std::mutex> write_lock(write_mutex_);
+  const std::uint64_t next_seq = slot_seq_ + 1;
+  BinlogRecord record;
+  record.seq = next_seq;
+  record.op = BinlogOp::kSet;
+  record.args = {"SET", std::string(key), std::string(value)};
+
+  binlog_buffer_.Append(std::move(record));
+  slot_seq_ = next_seq;
+
+  bool created = false;
+  {
+    std::lock_guard<std::mutex> value_lock(value_mutex_);
+    created = redis_obj_map_.Find(packed_key) == nullptr;
+    redis_obj_map_ = redis_obj_map_.Set(packed_key, object);
+    published_seq_ = next_seq;
+  }
+
+  return WriteResult{
+      Status::kOk,
+      true,
+      created,
+      next_seq,
+  };
+}
+
+ReadResult<std::string> HashSlot::GetString(std::string_view key,
+                                            std::uint64_t now_us) const {
+  const PackedString packed_key(key);
+  RedisObject object;
+  {
+    std::lock_guard<std::mutex> value_lock(value_mutex_);
+    const RedisObject* found = redis_obj_map_.Find(packed_key);
+    if (found == nullptr) {
+      return ReadResult<std::string>{Status::kNotFound, {}};
+    }
+    object = *found;
+  }
+
+  if (object.IsExpired(now_us)) {
+    return ReadResult<std::string>{Status::kNotFound, {}};
+  }
+
+  if (object.Type() != RedisObjectType::kString) {
+    return ReadResult<std::string>{Status::kWrongType, {}};
+  }
+
+  const PackedString* value = object.StringValue();
+  if (value == nullptr) {
+    return ReadResult<std::string>{Status::kWrongType, {}};
+  }
+  return ReadResult<std::string>{Status::kOk, value->ToString()};
+}
+
+WriteResult HashSlot::Del(std::string_view key, std::uint64_t now_us) {
+  const PackedString packed_key(key);
+
+  std::lock_guard<std::mutex> write_lock(write_mutex_);
+  const std::uint64_t next_seq = slot_seq_ + 1;
+
+  {
+    std::lock_guard<std::mutex> value_lock(value_mutex_);
+    const RedisObject* found = redis_obj_map_.Find(packed_key);
+    if (found == nullptr || found->IsExpired(now_us)) {
+      return WriteResult{Status::kOk, false, false, slot_seq_};
+    }
+  }
+
+  BinlogRecord record;
+  record.seq = next_seq;
+  record.op = BinlogOp::kDel;
+  record.args = {"DEL", std::string(key)};
+
+  binlog_buffer_.Append(std::move(record));
+  slot_seq_ = next_seq;
+
+  {
+    std::lock_guard<std::mutex> value_lock(value_mutex_);
+    auto erased = redis_obj_map_.Erase(packed_key);
+    if (erased.has_value()) {
+      redis_obj_map_ = *erased;
+    }
+    published_seq_ = next_seq;
+  }
+
+  return WriteResult{Status::kOk, true, false, next_seq};
+}
+
+SlotSnapshot HashSlot::Snapshot() const {
+  std::lock_guard<std::mutex> value_lock(value_mutex_);
+  return SlotSnapshot{redis_obj_map_, published_seq_};
+}
+
+std::vector<BinlogRecord> HashSlot::CopyLogsAfter(std::uint64_t seq,
+                                                  std::size_t limit) const {
+  std::lock_guard<std::mutex> write_lock(write_mutex_);
+  return binlog_buffer_.CopyAfter(seq, limit);
+}
+
+void HashSlot::AckLogsThrough(std::uint64_t seq) {
+  std::lock_guard<std::mutex> write_lock(write_mutex_);
+  binlog_buffer_.AckThrough(seq);
+}
+
+}  // namespace cache
