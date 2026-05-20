@@ -57,6 +57,12 @@ WriteResult CacheEngine::Del(std::string_view key, std::uint64_t now_us) {
   return SlotForKey(key).Del(key, now_us);
 }
 
+std::size_t CacheEngine::DeleteExpiredInSlot(std::size_t slot_id,
+                                             std::size_t max_keys,
+                                             std::uint64_t now_us) {
+  return SlotById(slot_id).DeleteExpired(max_keys, now_us);
+}
+
 bool CacheEngine::Expire(std::string_view key, std::int64_t seconds,
                          std::uint64_t now_us) {
   return SlotForKey(key).Expire(key, seconds, now_us);

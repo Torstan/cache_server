@@ -33,6 +33,8 @@ class CacheEngine {
   ReadResult<double> ZScore(std::string_view key, std::string_view member,
                             std::uint64_t now_us) const;
   WriteResult Del(std::string_view key, std::uint64_t now_us);
+  std::size_t DeleteExpiredInSlot(std::size_t slot_id, std::size_t max_keys,
+                                  std::uint64_t now_us);
   bool Expire(std::string_view key, std::int64_t seconds,
               std::uint64_t now_us);
   std::int64_t Ttl(std::string_view key, std::uint64_t now_us) const;

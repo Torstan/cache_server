@@ -6,6 +6,7 @@
 #include <sstream>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace cache {
 namespace {
@@ -402,6 +403,67 @@ WriteResult HashSlot::Del(std::string_view key, std::uint64_t now_us) {
   }
 
   return WriteResult{Status::kOk, true, false, next_seq};
+}
+
+std::size_t HashSlot::DeleteExpired(std::size_t max_keys,
+                                    std::uint64_t now_us) {
+  if (max_keys == 0) {
+    return 0;
+  }
+
+  ObjectMap snapshot;
+  {
+    std::lock_guard<std::mutex> value_lock(value_mutex_);
+    snapshot = redis_obj_map_;
+  }
+
+  std::vector<std::string> expired_keys;
+  expired_keys.reserve(max_keys);
+  snapshot.ForEach([&](const PackedString& key, const RedisObject& object) {
+    if (expired_keys.size() >= max_keys) {
+      return;
+    }
+    if (object.IsExpired(now_us)) {
+      expired_keys.push_back(key.ToString());
+    }
+  });
+
+  std::size_t deleted = 0;
+  for (const std::string& key : expired_keys) {
+    const PackedString packed_key(key);
+    std::lock_guard<std::mutex> write_lock(write_mutex_);
+    const std::uint64_t next_seq = slot_seq_ + 1;
+    ObjectMap next_map;
+
+    {
+      std::lock_guard<std::mutex> value_lock(value_mutex_);
+      const RedisObject* found = redis_obj_map_.Find(packed_key);
+      if (found == nullptr || !found->IsExpired(now_us)) {
+        continue;
+      }
+      auto erased = redis_obj_map_.Erase(packed_key);
+      if (!erased.has_value()) {
+        continue;
+      }
+      next_map = *erased;
+    }
+
+    BinlogRecord record;
+    record.seq = next_seq;
+    record.op = BinlogOp::kDel;
+    record.args = {"DEL", key};
+
+    binlog_buffer_.Append(std::move(record));
+    slot_seq_ = next_seq;
+
+    {
+      std::lock_guard<std::mutex> value_lock(value_mutex_);
+      redis_obj_map_ = std::move(next_map);
+      published_seq_ = next_seq;
+    }
+    ++deleted;
+  }
+  return deleted;
 }
 
 bool HashSlot::Expire(std::string_view key, std::int64_t seconds,
