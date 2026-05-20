@@ -7,10 +7,9 @@ namespace cache {
 WriteResult HashSlot::SetString(std::string_view key, std::string_view value,
                                 std::uint64_t now_us) {
   (void)now_us;
+  std::lock_guard<std::mutex> write_lock(write_mutex_);
   const PackedString packed_key(key);
   const RedisObject object = RedisObject::MakeString(value);
-
-  std::lock_guard<std::mutex> write_lock(write_mutex_);
   const std::uint64_t next_seq = slot_seq_ + 1;
   BinlogRecord record;
   record.seq = next_seq;

@@ -1,6 +1,12 @@
 #include "test_harness.h"
 
 #include "cache/hash_slot.h"
+#include "common/hash.h"
+
+CACHE_TEST(Fnva64MatchesKnownVector) {
+  test::Require(common::Fnva64("hello") == 0xa430d84680aabd0bULL,
+                "FNV-1a hash vector for hello");
+}
 
 CACHE_TEST(HashSlotPublishesWriteAndBinlogAtomically) {
   cache::HashSlot slot;
