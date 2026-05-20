@@ -1,4 +1,4 @@
-.PHONY: all init update clean help configure build test bench
+.PHONY: all init update update-jemalloc update-libco update-cpp_util clean status help configure build test bench
 
 all: build
 
