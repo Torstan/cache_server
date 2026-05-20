@@ -22,6 +22,20 @@ target_include_directories(cache_core PUBLIC
 
 target_link_libraries(cache_core PUBLIC colib_static pthread dl)
 
+if(CACHE_SERVER_USE_JEMALLOC)
+  set(JEMALLOC_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/jemalloc)
+  set(JEMALLOC_INCLUDE_DIR ${JEMALLOC_ROOT}/obj/include)
+  set(JEMALLOC_STATIC_LIB ${JEMALLOC_ROOT}/obj/lib/libjemalloc.a)
+  if(NOT EXISTS "${JEMALLOC_STATIC_LIB}")
+    message(FATAL_ERROR
+      "CACHE_SERVER_USE_JEMALLOC=ON requires ${JEMALLOC_STATIC_LIB}. "
+      "Build jemalloc first or configure with CACHE_SERVER_USE_JEMALLOC=OFF.")
+  endif()
+  target_include_directories(cache_core PUBLIC ${JEMALLOC_INCLUDE_DIR})
+  target_link_libraries(cache_core PUBLIC
+    -Wl,--whole-archive ${JEMALLOC_STATIC_LIB} -Wl,--no-whole-archive)
+endif()
+
 file(GLOB CACHE_TEST_SRCS CONFIGURE_DEPENDS tests/*_test.cpp)
 add_executable(cache_tests tests/test_harness.cpp ${CACHE_TEST_SRCS})
 target_link_libraries(cache_tests PRIVATE cache_core)
