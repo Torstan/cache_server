@@ -1,6 +1,5 @@
 #pragma once
 
-#include <array>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -31,7 +30,7 @@ class RespCodec {
   bool ConvertCommand(const redis::RespValue& value, CommandArgs* out);
 
   std::string stream_;
-  std::array<redis::RespValue, 256> scratch_{};
+  std::vector<redis::RespValue> scratch_;
   redis::RespLimits limits_;
   std::size_t max_stream_bytes_;
   bool protocol_error_ = false;

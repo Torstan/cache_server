@@ -28,3 +28,16 @@ CACHE_TEST(RespCodecPacksResponses) {
   protocol::PackResponse(Response::NullBulk(), &out);
   test::RequireEqual(out, "+OK\r\n:2\r\n$3\r\nabc\r\n$-1\r\n", "packed RESP");
 }
+
+CACHE_TEST(RespCodecHonorsConfiguredArrayLimit) {
+  RespCodec codec(1024 * 1024, 1024, 300);
+  std::string command = "*300\r\n";
+  for (int i = 0; i < 300; ++i) {
+    command += "$1\r\na\r\n";
+  }
+
+  test::Require(codec.AppendBytes(command), "large command appends");
+  auto parsed = codec.NextCommand();
+  test::Require(parsed.has_value(), "large command parses");
+  test::Require(parsed->args.size() == 300, "configured array limit is honored");
+}
