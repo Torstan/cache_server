@@ -43,6 +43,8 @@ using co::co_poll;
 using co::co_resume;
 using co::co_yield_ct;
 
+constexpr std::size_t kPendingFdLimit = 4096;
+
 struct Task {
   Coroutine* coroutine = nullptr;
   int fd = -1;
@@ -60,6 +62,10 @@ class Worker {
 
   void DispatchFd(int fd) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (pending_fds_.size() >= kPendingFdLimit) {
+      close(fd);
+      return;
+    }
     pending_fds_.push_back(fd);
     has_pending_fds_.store(true, std::memory_order_relaxed);
   }
@@ -240,8 +246,16 @@ class Worker {
 
     if (!pending_fds.empty()) {
       std::lock_guard<std::mutex> lock(mutex_);
-      pending_fds_.splice(pending_fds_.begin(), pending_fds);
-      has_pending_fds_.store(true, std::memory_order_relaxed);
+      while (!pending_fds.empty() && pending_fds_.size() < kPendingFdLimit) {
+        pending_fds_.push_back(pending_fds.front());
+        pending_fds.pop_front();
+      }
+      while (!pending_fds.empty()) {
+        close(pending_fds.front());
+        pending_fds.pop_front();
+      }
+      has_pending_fds_.store(!pending_fds_.empty(),
+                             std::memory_order_relaxed);
     }
     return 0;
   }
@@ -330,7 +344,10 @@ void AcceptRoutine() {
       continue;
     }
 
-    SetNonBlock(fd);
+    if (SetNonBlock(fd) != 0) {
+      close(fd);
+      continue;
+    }
     (*g_workers)[next_worker]->DispatchFd(fd);
     next_worker = (next_worker + 1) % g_workers->size();
   }
