@@ -24,6 +24,9 @@ class HashSlot {
   ReadResult<std::string> GetString(std::string_view key,
                                     std::uint64_t now_us) const;
   WriteResult Del(std::string_view key, std::uint64_t now_us);
+  bool Expire(std::string_view key, std::int64_t seconds,
+              std::uint64_t now_us);
+  std::int64_t Ttl(std::string_view key, std::uint64_t now_us) const;
   SlotSnapshot Snapshot() const;
   std::vector<BinlogRecord> CopyLogsAfter(std::uint64_t seq,
                                           std::size_t limit) const;
