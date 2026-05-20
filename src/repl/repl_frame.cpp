@@ -108,6 +108,9 @@ std::optional<Frame> DecodeLog(const redis::RespValue& value) {
       !ttl.has_value() || !arg_count.has_value()) {
     return std::nullopt;
   }
+  if (*arg_count > value.element_count - 7) {
+    return std::nullopt;
+  }
   if (value.element_count != 7 + *arg_count) {
     return std::nullopt;
   }
@@ -135,7 +138,10 @@ std::optional<Frame> DecodeAck(const redis::RespValue& value) {
   }
 
   auto count = ParseSize(value.elements[2].text);
-  if (!count.has_value() || value.element_count != 3 + *count * 2) {
+  if (!count.has_value() || *count > (value.element_count - 3) / 2) {
+    return std::nullopt;
+  }
+  if (value.element_count != 3 + *count * 2) {
     return std::nullopt;
   }
 

@@ -1,6 +1,7 @@
 #include "test_harness.h"
 
 #include "cache/cache_engine.h"
+#include "redis/resp.h"
 #include "repl/master_replicator.h"
 #include "repl/repl_frame.h"
 
@@ -30,4 +31,15 @@ CACHE_TEST(MasterReplicatorUsesAckToCleanLogs) {
 
   auto records = engine.SlotForKey("k").CopyLogsAfter(0, 10);
   test::Require(records.empty(), "acked logs are cleaned");
+}
+
+CACHE_TEST(ReplFrameRejectsMalformedAckCount) {
+  std::string wire;
+  redis::PackArrayHeader(3, &wire);
+  redis::PackBulkString("CACHE.REPL", &wire);
+  redis::PackBulkString("ACK", &wire);
+  redis::PackBulkString("999999999999999999", &wire);
+
+  test::Require(!repl::DecodeFrame(wire).has_value(),
+                "malformed ACK count is rejected");
 }
