@@ -1,5 +1,7 @@
 #include "test_harness.h"
 
+#include <limits>
+
 #include "cache/cache_engine.h"
 #include "redis/resp.h"
 #include "repl/master_replicator.h"
@@ -71,4 +73,48 @@ CACHE_TEST(SlaveApplyHoldsOutOfOrderLogsUntilGapFilled) {
   test::Require(read.status == cache::Status::kOk, "key exists after gap fill");
   test::RequireEqual(read.value, "v2", "pending seq2 applies after seq1");
   test::Require(slave.AppliedSeqForTest(slot) == 2, "applied seq advances");
+}
+
+CACHE_TEST(SlaveApplyDoesNotAdvanceSeqForMalformedLog) {
+  cache::CacheEngine engine;
+  repl::SlaveReplicator slave(&engine, 4);
+
+  cache::BinlogRecord malformed;
+  malformed.seq = 1;
+  malformed.op = cache::BinlogOp::kSet;
+  malformed.args = {"SET", "k"};
+
+  const std::size_t slot = common::SlotForKey("k");
+  slave.ApplyLogForTest(slot, malformed, 1000);
+
+  test::Require(slave.AppliedSeqForTest(slot) == 0,
+                "malformed log does not advance seq");
+  test::Require(engine.GetString("k", 1000).status == cache::Status::kNotFound,
+                "malformed log does not mutate data");
+}
+
+CACHE_TEST(SlaveApplySaturatedExpireDoesNotDeleteKey) {
+  cache::CacheEngine engine;
+  repl::SlaveReplicator slave(&engine, 4);
+
+  cache::BinlogRecord set;
+  set.seq = 1;
+  set.op = cache::BinlogOp::kSet;
+  set.args = {"SET", "ttl", "v"};
+
+  cache::BinlogRecord expire;
+  expire.seq = 2;
+  expire.op = cache::BinlogOp::kExpire;
+  expire.args = {"EXPIRE", "ttl", "1"};
+  expire.remaining_ttl_us = std::numeric_limits<std::uint64_t>::max();
+
+  const std::size_t slot = common::SlotForKey("ttl");
+  slave.ApplyLogForTest(slot, set, 1000);
+  slave.ApplyLogForTest(slot, expire, 1000);
+
+  auto read = engine.GetString("ttl", 1000);
+  test::Require(read.status == cache::Status::kOk,
+                "saturated expire keeps key");
+  test::Require(slave.AppliedSeqForTest(slot) == 2,
+                "saturated expire advances seq");
 }
