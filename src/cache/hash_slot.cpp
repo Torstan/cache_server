@@ -1,6 +1,9 @@
 #include "cache/hash_slot.h"
 
+#include <iomanip>
 #include <limits>
+#include <locale>
+#include <sstream>
 #include <string>
 #include <utility>
 
@@ -24,6 +27,29 @@ std::uint64_t SaturatingDeadlineUs(std::uint64_t now_us,
     return std::numeric_limits<std::uint64_t>::max();
   }
   return now_us + ttl_us;
+}
+
+std::string FormatScore(double score) {
+  std::ostringstream out;
+  out.imbue(std::locale::classic());
+  out << std::setprecision(17) << score;
+  std::string text = out.str();
+  if (text.find('.') != std::string::npos) {
+    while (!text.empty() && text.back() == '0') {
+      text.pop_back();
+    }
+    if (!text.empty() && text.back() == '.') {
+      text.pop_back();
+    }
+  }
+  return text;
+}
+
+RedisObject PreserveDeadline(RedisObject object, std::uint64_t deadline_us) {
+  if (deadline_us == 0) {
+    return object;
+  }
+  return object.WithDeadline(deadline_us);
 }
 
 }  // namespace
@@ -91,6 +117,254 @@ ReadResult<std::string> HashSlot::GetString(std::string_view key,
     return ReadResult<std::string>{Status::kWrongType, {}};
   }
   return ReadResult<std::string>{Status::kOk, value->ToString()};
+}
+
+WriteResult HashSlot::HSet(std::string_view key, std::string_view field,
+                           std::string_view value, std::uint64_t now_us) {
+  const PackedString packed_key(key);
+  const PackedString packed_field(field);
+  const PackedString packed_value(value);
+
+  std::lock_guard<std::mutex> write_lock(write_mutex_);
+  const std::uint64_t next_seq = slot_seq_ + 1;
+  ObjectMap current_map;
+  RedisObject object;
+  bool found_object = false;
+  {
+    std::lock_guard<std::mutex> value_lock(value_mutex_);
+    current_map = redis_obj_map_;
+    const RedisObject* found = redis_obj_map_.Find(packed_key);
+    if (found != nullptr) {
+      object = *found;
+      found_object = true;
+    }
+  }
+
+  HashValue hash;
+  std::uint64_t deadline_us = 0;
+  bool created = true;
+  if (found_object && !object.IsExpired(now_us)) {
+    if (object.Type() != RedisObjectType::kHash || object.Hash() == nullptr) {
+      return WriteResult{Status::kWrongType, false, false, slot_seq_};
+    }
+    hash = *object.Hash();
+    deadline_us = object.DeadlineUs();
+    created = hash.Find(packed_field) == nullptr;
+  }
+
+  HashValue next_hash = hash.Set(packed_field, packed_value);
+  RedisObject next_object =
+      PreserveDeadline(RedisObject::MakeHash(std::move(next_hash)), deadline_us);
+  ObjectMap next_map = current_map.Set(packed_key, next_object);
+
+  BinlogRecord record;
+  record.seq = next_seq;
+  record.op = BinlogOp::kHSet;
+  record.args = {"HSET", std::string(key), std::string(field),
+                 std::string(value)};
+
+  binlog_buffer_.Append(std::move(record));
+  slot_seq_ = next_seq;
+
+  {
+    std::lock_guard<std::mutex> value_lock(value_mutex_);
+    redis_obj_map_ = std::move(next_map);
+    published_seq_ = next_seq;
+  }
+
+  return WriteResult{Status::kOk, true, created, next_seq};
+}
+
+ReadResult<std::string> HashSlot::HGet(std::string_view key,
+                                       std::string_view field,
+                                       std::uint64_t now_us) const {
+  const PackedString packed_key(key);
+  const PackedString packed_field(field);
+  RedisObject object;
+  {
+    std::lock_guard<std::mutex> value_lock(value_mutex_);
+    const RedisObject* found = redis_obj_map_.Find(packed_key);
+    if (found == nullptr) {
+      return ReadResult<std::string>{Status::kNotFound, {}};
+    }
+    object = *found;
+  }
+
+  if (object.IsExpired(now_us)) {
+    return ReadResult<std::string>{Status::kNotFound, {}};
+  }
+  if (object.Type() != RedisObjectType::kHash || object.Hash() == nullptr) {
+    return ReadResult<std::string>{Status::kWrongType, {}};
+  }
+
+  const PackedString* found = object.Hash()->Find(packed_field);
+  if (found == nullptr) {
+    return ReadResult<std::string>{Status::kNotFound, {}};
+  }
+  return ReadResult<std::string>{Status::kOk, found->ToString()};
+}
+
+WriteResult HashSlot::SAdd(std::string_view key, std::string_view member,
+                           std::uint64_t now_us) {
+  const PackedString packed_key(key);
+  const PackedString packed_member(member);
+
+  std::lock_guard<std::mutex> write_lock(write_mutex_);
+  ObjectMap current_map;
+  RedisObject object;
+  bool found_object = false;
+  {
+    std::lock_guard<std::mutex> value_lock(value_mutex_);
+    current_map = redis_obj_map_;
+    const RedisObject* found = redis_obj_map_.Find(packed_key);
+    if (found != nullptr) {
+      object = *found;
+      found_object = true;
+    }
+  }
+
+  SetValue set;
+  std::uint64_t deadline_us = 0;
+  if (found_object && !object.IsExpired(now_us)) {
+    if (object.Type() != RedisObjectType::kSet || object.Set() == nullptr) {
+      return WriteResult{Status::kWrongType, false, false, slot_seq_};
+    }
+    set = *object.Set();
+    deadline_us = object.DeadlineUs();
+    if (set.Contains(packed_member)) {
+      return WriteResult{Status::kOk, false, false, slot_seq_};
+    }
+  }
+
+  const std::uint64_t next_seq = slot_seq_ + 1;
+  SetValue next_set = set.Add(packed_member);
+  RedisObject next_object =
+      PreserveDeadline(RedisObject::MakeSet(std::move(next_set)), deadline_us);
+  ObjectMap next_map = current_map.Set(packed_key, next_object);
+
+  BinlogRecord record;
+  record.seq = next_seq;
+  record.op = BinlogOp::kSAdd;
+  record.args = {"SADD", std::string(key), std::string(member)};
+
+  binlog_buffer_.Append(std::move(record));
+  slot_seq_ = next_seq;
+
+  {
+    std::lock_guard<std::mutex> value_lock(value_mutex_);
+    redis_obj_map_ = std::move(next_map);
+    published_seq_ = next_seq;
+  }
+
+  return WriteResult{Status::kOk, true, true, next_seq};
+}
+
+ReadResult<bool> HashSlot::SIsMember(std::string_view key,
+                                     std::string_view member,
+                                     std::uint64_t now_us) const {
+  const PackedString packed_key(key);
+  const PackedString packed_member(member);
+  RedisObject object;
+  {
+    std::lock_guard<std::mutex> value_lock(value_mutex_);
+    const RedisObject* found = redis_obj_map_.Find(packed_key);
+    if (found == nullptr) {
+      return ReadResult<bool>{Status::kNotFound, false};
+    }
+    object = *found;
+  }
+
+  if (object.IsExpired(now_us)) {
+    return ReadResult<bool>{Status::kNotFound, false};
+  }
+  if (object.Type() != RedisObjectType::kSet || object.Set() == nullptr) {
+    return ReadResult<bool>{Status::kWrongType, false};
+  }
+  return ReadResult<bool>{Status::kOk, object.Set()->Contains(packed_member)};
+}
+
+WriteResult HashSlot::ZAdd(std::string_view key, double score,
+                           std::string_view member, std::uint64_t now_us) {
+  const PackedString packed_key(key);
+  const PackedString packed_member(member);
+
+  std::lock_guard<std::mutex> write_lock(write_mutex_);
+  const std::uint64_t next_seq = slot_seq_ + 1;
+  ObjectMap current_map;
+  RedisObject object;
+  bool found_object = false;
+  {
+    std::lock_guard<std::mutex> value_lock(value_mutex_);
+    current_map = redis_obj_map_;
+    const RedisObject* found = redis_obj_map_.Find(packed_key);
+    if (found != nullptr) {
+      object = *found;
+      found_object = true;
+    }
+  }
+
+  ZSetValue zset;
+  std::uint64_t deadline_us = 0;
+  bool created = true;
+  if (found_object && !object.IsExpired(now_us)) {
+    if (object.Type() != RedisObjectType::kZSet || object.ZSet() == nullptr) {
+      return WriteResult{Status::kWrongType, false, false, slot_seq_};
+    }
+    zset = *object.ZSet();
+    deadline_us = object.DeadlineUs();
+    created = zset.Find(packed_member) == nullptr;
+  }
+
+  ZSetValue next_zset = zset.Set(packed_member, score);
+  RedisObject next_object =
+      PreserveDeadline(RedisObject::MakeZSet(std::move(next_zset)), deadline_us);
+  ObjectMap next_map = current_map.Set(packed_key, next_object);
+
+  BinlogRecord record;
+  record.seq = next_seq;
+  record.op = BinlogOp::kZAdd;
+  record.args = {"ZADD", std::string(key), FormatScore(score),
+                 std::string(member)};
+
+  binlog_buffer_.Append(std::move(record));
+  slot_seq_ = next_seq;
+
+  {
+    std::lock_guard<std::mutex> value_lock(value_mutex_);
+    redis_obj_map_ = std::move(next_map);
+    published_seq_ = next_seq;
+  }
+
+  return WriteResult{Status::kOk, true, created, next_seq};
+}
+
+ReadResult<double> HashSlot::ZScore(std::string_view key,
+                                    std::string_view member,
+                                    std::uint64_t now_us) const {
+  const PackedString packed_key(key);
+  const PackedString packed_member(member);
+  RedisObject object;
+  {
+    std::lock_guard<std::mutex> value_lock(value_mutex_);
+    const RedisObject* found = redis_obj_map_.Find(packed_key);
+    if (found == nullptr) {
+      return ReadResult<double>{Status::kNotFound, 0.0};
+    }
+    object = *found;
+  }
+
+  if (object.IsExpired(now_us)) {
+    return ReadResult<double>{Status::kNotFound, 0.0};
+  }
+  if (object.Type() != RedisObjectType::kZSet || object.ZSet() == nullptr) {
+    return ReadResult<double>{Status::kWrongType, 0.0};
+  }
+
+  const double* found = object.ZSet()->Find(packed_member);
+  if (found == nullptr) {
+    return ReadResult<double>{Status::kNotFound, 0.0};
+  }
+  return ReadResult<double>{Status::kOk, *found};
 }
 
 WriteResult HashSlot::Del(std::string_view key, std::uint64_t now_us) {

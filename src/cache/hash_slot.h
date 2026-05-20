@@ -23,6 +23,18 @@ class HashSlot {
                         std::uint64_t now_us);
   ReadResult<std::string> GetString(std::string_view key,
                                     std::uint64_t now_us) const;
+  WriteResult HSet(std::string_view key, std::string_view field,
+                   std::string_view value, std::uint64_t now_us);
+  ReadResult<std::string> HGet(std::string_view key, std::string_view field,
+                               std::uint64_t now_us) const;
+  WriteResult SAdd(std::string_view key, std::string_view member,
+                   std::uint64_t now_us);
+  ReadResult<bool> SIsMember(std::string_view key, std::string_view member,
+                             std::uint64_t now_us) const;
+  WriteResult ZAdd(std::string_view key, double score, std::string_view member,
+                   std::uint64_t now_us);
+  ReadResult<double> ZScore(std::string_view key, std::string_view member,
+                            std::uint64_t now_us) const;
   WriteResult Del(std::string_view key, std::uint64_t now_us);
   bool Expire(std::string_view key, std::int64_t seconds,
               std::uint64_t now_us);

@@ -4,8 +4,11 @@
 #include <limits>
 
 #include "cache/cache_engine.h"
+#include "command/hash_cmd.h"
 #include "command/key_cmd.h"
+#include "command/set_cmd.h"
 #include "command/string_cmd.h"
+#include "command/zset_cmd.h"
 #include "protocol/response.h"
 
 namespace {
@@ -121,4 +124,39 @@ CACHE_TEST(ExpireUsesSaturatedTtlInBinlog) {
   test::Require(logs[1].remaining_ttl_us ==
                     std::numeric_limits<std::uint64_t>::max(),
                 "EXPIRE log stores saturated remaining TTL");
+}
+
+CACHE_TEST(HashSetAndZSetCommandsMatchRedisSubset) {
+  cache::CacheEngine engine;
+  const std::uint64_t now_us = 10'000;
+
+  test::Require(
+      command::HSetCmd("h", "f", "v").ExecCmd(engine, now_us).integer == 1,
+      "HSET new field returns 1");
+  test::Require(
+      command::HSetCmd("h", "f", "v2").ExecCmd(engine, now_us).integer == 0,
+      "HSET existing field returns 0");
+  test::RequireEqual(
+      command::HGetCmd("h", "f").ExecCmd(engine, now_us).text, "v2",
+      "HGET returns updated value");
+
+  test::Require(command::SAddCmd("s", "m").ExecCmd(engine, now_us).integer ==
+                    1,
+                "SADD new member returns 1");
+  test::Require(command::SAddCmd("s", "m").ExecCmd(engine, now_us).integer ==
+                    0,
+                "SADD existing member returns 0");
+  test::Require(
+      command::SIsMemberCmd("s", "m").ExecCmd(engine, now_us).integer == 1,
+      "SISMEMBER returns 1");
+
+  test::Require(
+      command::ZAddCmd("z", 1.5, "m").ExecCmd(engine, now_us).integer == 1,
+      "ZADD new member returns 1");
+  test::Require(
+      command::ZAddCmd("z", 2.5, "m").ExecCmd(engine, now_us).integer == 0,
+      "ZADD existing member returns 0");
+  test::RequireEqual(
+      command::ZScoreCmd("z", "m").ExecCmd(engine, now_us).text, "2.5",
+      "ZSCORE returns score");
 }
