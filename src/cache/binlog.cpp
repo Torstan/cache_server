@@ -11,6 +11,9 @@ void BinlogBuffer::Append(BinlogRecord record) {
 std::vector<BinlogRecord> BinlogBuffer::CopyAfter(std::uint64_t seq,
                                                   std::size_t limit) const {
   std::vector<BinlogRecord> result;
+  if (limit == 0) {
+    return result;
+  }
   result.reserve(limit);
   for (const BinlogRecord& record : records_) {
     if (record.seq > seq) {

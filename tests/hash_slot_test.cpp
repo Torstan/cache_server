@@ -23,6 +23,7 @@ CACHE_TEST(HashSlotPublishesWriteAndBinlogAtomically) {
   auto logs = slot.CopyLogsAfter(0, 10);
   test::Require(logs.size() == 1, "one log exists");
   test::Require(logs[0].seq == 1, "log seq matches published seq");
+  test::Require(slot.CopyLogsAfter(0, 0).empty(), "zero log limit returns none");
 
   slot.AckLogsThrough(1);
   test::Require(slot.CopyLogsAfter(0, 10).empty(), "acked log is removed");

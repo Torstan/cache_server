@@ -11,6 +11,14 @@ WriteResult HashSlot::SetString(std::string_view key, std::string_view value,
   const PackedString packed_key(key);
   const RedisObject object = RedisObject::MakeString(value);
   const std::uint64_t next_seq = slot_seq_ + 1;
+  ObjectMap next_map;
+  bool created = false;
+  {
+    std::lock_guard<std::mutex> value_lock(value_mutex_);
+    created = redis_obj_map_.Find(packed_key) == nullptr;
+    next_map = redis_obj_map_.Set(packed_key, object);
+  }
+
   BinlogRecord record;
   record.seq = next_seq;
   record.op = BinlogOp::kSet;
@@ -19,11 +27,9 @@ WriteResult HashSlot::SetString(std::string_view key, std::string_view value,
   binlog_buffer_.Append(std::move(record));
   slot_seq_ = next_seq;
 
-  bool created = false;
   {
     std::lock_guard<std::mutex> value_lock(value_mutex_);
-    created = redis_obj_map_.Find(packed_key) == nullptr;
-    redis_obj_map_ = redis_obj_map_.Set(packed_key, object);
+    redis_obj_map_ = std::move(next_map);
     published_seq_ = next_seq;
   }
 
@@ -68,6 +74,7 @@ WriteResult HashSlot::Del(std::string_view key, std::uint64_t now_us) {
 
   std::lock_guard<std::mutex> write_lock(write_mutex_);
   const std::uint64_t next_seq = slot_seq_ + 1;
+  ObjectMap next_map;
 
   {
     std::lock_guard<std::mutex> value_lock(value_mutex_);
@@ -75,6 +82,11 @@ WriteResult HashSlot::Del(std::string_view key, std::uint64_t now_us) {
     if (found == nullptr || found->IsExpired(now_us)) {
       return WriteResult{Status::kOk, false, false, slot_seq_};
     }
+    auto erased = redis_obj_map_.Erase(packed_key);
+    if (!erased.has_value()) {
+      return WriteResult{Status::kOk, false, false, slot_seq_};
+    }
+    next_map = *erased;
   }
 
   BinlogRecord record;
@@ -87,10 +99,7 @@ WriteResult HashSlot::Del(std::string_view key, std::uint64_t now_us) {
 
   {
     std::lock_guard<std::mutex> value_lock(value_mutex_);
-    auto erased = redis_obj_map_.Erase(packed_key);
-    if (erased.has_value()) {
-      redis_obj_map_ = *erased;
-    }
+    redis_obj_map_ = std::move(next_map);
     published_seq_ = next_seq;
   }
 
