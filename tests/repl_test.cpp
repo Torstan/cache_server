@@ -310,6 +310,43 @@ CACHE_TEST(SlaveApplyRejectsFrameSlotKeyMismatch) {
                 "mismatched frame slot does not mutate key");
 }
 
+CACHE_TEST(ReplEndToEndCommandAgnostic) {
+  cache::CacheEngine master_engine;
+  cache::CacheEngine slave_engine;
+  repl::SlaveReplicator replicator(&slave_engine, 1);
+  const std::uint64_t now_us = 1000000;
+
+  cache::BinlogRecord set_rec;
+  set_rec.op = cache::BinlogOp::kSet;
+  set_rec.args = {"SET", "key1", "value1"};
+  master_engine.Set("key1", cache::RedisObject::MakeString("value1"),
+                    std::move(set_rec), now_us);
+
+  auto logs = master_engine.SlotForKey("key1").CopyLogsAfter(0, 10);
+  test::Require(logs.size() == 1, "one log entry");
+
+  repl::Frame frame =
+      repl::Frame::Log(common::SlotForKey("key1"), std::move(logs[0]));
+  std::string wire = repl::EncodeFrame(frame);
+  auto decoded = repl::DecodeFrame(wire);
+  test::Require(decoded.has_value(), "frame decodes");
+  test::Require(!decoded->record.op.has_value(), "decoded op is absent");
+  test::Require(decoded->record.args.size() == 3, "decoded args count");
+  test::RequireEqual(decoded->record.args[0], std::string("SET"),
+                     "decoded command name");
+
+  replicator.EnqueueFrame(std::move(*decoded));
+
+  auto result = slave_engine.Get("key1", now_us);
+  test::Require(result.has_value(), "key replicated");
+  test::Require(result->Type() == cache::RedisObjectType::kString,
+                "type preserved");
+  const cache::PackedString* value = result->StringValue();
+  test::Require(value != nullptr, "string value pointer exists");
+  test::RequireEqual(value->ToString(), std::string("value1"),
+                     "value preserved");
+}
+
 CACHE_TEST(SlaveApplyViaCommandDispatcher) {
   cache::CacheEngine engine;
   repl::SlaveReplicator slave(&engine, 1);
