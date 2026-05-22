@@ -79,7 +79,6 @@ std::optional<Frame> DecodeLog(const redis::RespValue& value) {
 
   cache::BinlogRecord record;
   record.seq = *seq;
-  record.op = cache::BinlogOp::kSet;
   record.remaining_ttl_us = *ttl;
   record.args.reserve(*arg_count);
   for (std::size_t i = 0; i < *arg_count; ++i) {

@@ -46,24 +46,6 @@ bool RelativeExpireSeconds(const cache::BinlogRecord& record,
   return false;
 }
 
-std::string_view CommandNameForOp(cache::BinlogOp op) {
-  switch (op) {
-    case cache::BinlogOp::kSet:
-      return "SET";
-    case cache::BinlogOp::kDel:
-      return "DEL";
-    case cache::BinlogOp::kExpire:
-      return "EXPIRE";
-    case cache::BinlogOp::kHSet:
-      return "HSET";
-    case cache::BinlogOp::kSAdd:
-      return "SADD";
-    case cache::BinlogOp::kZAdd:
-      return "ZADD";
-  }
-  return "";
-}
-
 bool EqualsAsciiCaseInsensitive(std::string_view lhs, std::string_view rhs) {
   if (lhs.size() != rhs.size()) {
     return false;
@@ -76,10 +58,6 @@ bool EqualsAsciiCaseInsensitive(std::string_view lhs, std::string_view rhs) {
     }
   }
   return true;
-}
-
-bool CommandNameMatchesOp(const cache::BinlogRecord& record) {
-  return EqualsAsciiCaseInsensitive(record.args[0], CommandNameForOp(record.op));
 }
 
 bool IsCommand(const cache::BinlogRecord& record, std::string_view command) {
@@ -179,11 +157,6 @@ bool SlaveReplicator::ApplyRecordViaDispatcher(
     const cache::BinlogRecord& record, std::uint64_t now_us,
     std::size_t slot_id) {
   if (engine_ == nullptr || record.args.size() < 2) {
-    return false;
-  }
-  // Non-SET op values are authoritative for manually constructed records until
-  // BinlogOp becomes optional; decoded frames use kSet as a placeholder.
-  if (record.op != cache::BinlogOp::kSet && !CommandNameMatchesOp(record)) {
     return false;
   }
 

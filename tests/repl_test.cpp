@@ -66,6 +66,16 @@ CACHE_TEST(ReplFrameRoundTripsLog) {
   test::Require(decoded->record.seq == 7, "seq round trips");
 }
 
+CACHE_TEST(BinlogRecordWorksWithoutOpField) {
+  cache::BinlogRecord record;
+  record.seq = 1;
+  record.args = {"SET", "key", "value"};
+  record.remaining_ttl_us = 0;
+
+  test::RequireEqual(record.args[0], std::string("SET"), "command in args[0]");
+  test::Require(record.args.size() == 3, "args complete");
+}
+
 CACHE_TEST(ReplFrameEncodesCommandNameDirectly) {
   cache::BinlogRecord record;
   record.seq = 42;
@@ -81,6 +91,7 @@ CACHE_TEST(ReplFrameEncodesCommandNameDirectly) {
   test::Require(decoded->subcmd == repl::Subcmd::kLog, "is LOG frame");
   test::Require(decoded->slot_id == 5, "slot_id preserved");
   test::Require(decoded->record.seq == 42, "seq preserved");
+  test::Require(!decoded->record.op.has_value(), "decoded op is absent");
   test::Require(decoded->record.args.size() == 2, "args count");
   test::RequireEqual(decoded->record.args[0], std::string("DEL"),
                      "command name");
@@ -203,21 +214,19 @@ CACHE_TEST(SlaveApplyDoesNotAdvanceSeqForMalformedLog) {
                 "malformed log does not mutate data");
 }
 
-CACHE_TEST(SlaveApplyRejectsMismatchedCommandName) {
+CACHE_TEST(SlaveApplyUsesCommandNameWhenOpDiffers) {
   cache::CacheEngine engine;
   repl::SlaveReplicator slave(&engine, 4);
 
-  WriteString(engine, "k", "v", 1000);
   cache::BinlogRecord mismatch =
-      MakeRecord(1, cache::BinlogOp::kDel, {"GET", "k"});
+      MakeRecord(1, cache::BinlogOp::kDel, {"SET", "k", "v"});
 
   const std::size_t slot = common::SlotForKey("k");
   slave.ApplyLogForTest(slot, mismatch, 1000);
 
-  test::Require(slave.AppliedSeqForTest(slot) == 0,
-                "mismatched command does not advance seq");
-  test::Require(engine.Get("k", 1000).has_value(),
-                "mismatched command does not delete key");
+  test::Require(slave.AppliedSeqForTest(slot) == 1,
+                "command-name replay advances seq");
+  RequireString(engine, "k", 1000, "v");
 }
 
 CACHE_TEST(SlaveApplyRejectsReadCommandReplay) {

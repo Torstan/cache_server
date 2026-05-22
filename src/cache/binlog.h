@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -19,7 +20,7 @@ enum class BinlogOp {
 
 struct BinlogRecord {
   std::uint64_t seq = 0;
-  BinlogOp op = BinlogOp::kSet;
+  std::optional<BinlogOp> op;
   std::vector<std::string> args;
   std::uint64_t remaining_ttl_us = 0;
 };

@@ -142,7 +142,8 @@ CACHE_TEST(ExpireUsesSaturatedTtlInBinlog) {
 
   auto logs = engine.SlotForKey("overflow").CopyLogsAfter(0, 10);
   test::Require(logs.size() == 2, "SET and EXPIRE logs are present");
-  test::Require(logs[1].op == cache::BinlogOp::kExpire,
+  test::Require(logs[1].op.has_value() &&
+                    *logs[1].op == cache::BinlogOp::kExpire,
                 "second log records EXPIRE");
   test::Require(logs[1].remaining_ttl_us ==
                     std::numeric_limits<std::uint64_t>::max(),
