@@ -88,6 +88,11 @@ void SlaveReplicator::ApplyLogForTest(std::size_t slot_id,
   ApplyLog(slot_id, record, now_us);
 }
 
+bool SlaveReplicator::ApplyRecordViaDispatcherForTest(
+    const cache::BinlogRecord& record, std::uint64_t now_us) {
+  return ApplyRecordViaDispatcher(record, now_us);
+}
+
 std::uint64_t SlaveReplicator::AppliedSeqForTest(std::size_t slot_id) const {
   const SlotApplyState* state = FindStateForSlot(slot_id);
   return state == nullptr ? 0 : state->applied_seq;
@@ -146,17 +151,31 @@ bool SlaveReplicator::ApplyRecordViaDispatcher(
     return false;
   }
 
+  std::vector<std::string> owned_args = record.args;
+  if (record.op == cache::BinlogOp::kExpire &&
+      (owned_args.size() == 2 || owned_args.size() == 3)) {
+    std::int64_t seconds = 0;
+    if (!RelativeExpireSeconds(record, &seconds)) {
+      return false;
+    }
+    if (owned_args.size() == 2) {
+      owned_args.push_back(std::to_string(seconds));
+    } else {
+      owned_args[2] = std::to_string(seconds);
+    }
+  }
+
   std::vector<std::string_view> args;
-  args.reserve(record.args.size());
-  for (const std::string& arg : record.args) {
+  args.reserve(owned_args.size());
+  for (const std::string& arg : owned_args) {
     args.push_back(arg);
   }
 
   protocol::Response response = dispatcher_.Execute(args, *engine_, now_us);
 
-  return response.type == protocol::ResponseType::kSimpleString ||
-         response.type == protocol::ResponseType::kInteger ||
-         response.type == protocol::ResponseType::kBulkString;
+  // Binlog records are expected to replay write commands; dispatcher command
+  // errors are the only response shape that means the mutation was not applied.
+  return response.type != protocol::ResponseType::kError;
 }
 
 bool SlaveReplicator::ApplyRecord(const cache::BinlogRecord& record,

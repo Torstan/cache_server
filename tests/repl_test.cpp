@@ -134,8 +134,8 @@ CACHE_TEST(SlaveApplyViaCommandDispatcher) {
   record.op = cache::BinlogOp::kSet;
   record.args = {"SET", "key1", "value1"};
 
-  const std::size_t slot = common::SlotForKey("key1");
-  slave.ApplyLogForTest(slot, record, 1000000);
+  test::Require(slave.ApplyRecordViaDispatcherForTest(record, 1000000),
+                "dispatcher replay succeeds");
 
   auto result = engine.Get("key1", 1000000);
   test::Require(result.has_value(), "key exists");
@@ -144,6 +144,41 @@ CACHE_TEST(SlaveApplyViaCommandDispatcher) {
   const cache::PackedString* value = result->StringValue();
   test::RequireEqual(value->ToString(), std::string("value1"),
                      "value matches");
+}
+
+CACHE_TEST(SlaveApplyViaCommandDispatcherUsesRemainingTtl) {
+  cache::CacheEngine engine;
+  repl::SlaveReplicator slave(&engine, 1);
+
+  cache::BinlogRecord set =
+      MakeRecord(1, cache::BinlogOp::kSet, {"SET", "ttl", "v"});
+
+  cache::BinlogRecord expire;
+  expire.seq = 2;
+  expire.op = cache::BinlogOp::kExpire;
+  expire.args = {"EXPIRE", "ttl", "1"};
+  expire.remaining_ttl_us = std::numeric_limits<std::uint64_t>::max();
+
+  const std::uint64_t now_us = 1000;
+  test::Require(slave.ApplyRecordViaDispatcherForTest(set, now_us),
+                "dispatcher SET replay succeeds");
+  test::Require(slave.ApplyRecordViaDispatcherForTest(expire, now_us),
+                "dispatcher EXPIRE replay succeeds");
+
+  RequireString(engine, "ttl", now_us + 2'000'000, "v");
+}
+
+CACHE_TEST(SlaveApplyViaCommandDispatcherRejectsUnknownCommand) {
+  cache::CacheEngine engine;
+  repl::SlaveReplicator slave(&engine, 1);
+
+  cache::BinlogRecord record =
+      MakeRecord(1, cache::BinlogOp::kSet, {"NO_SUCH_COMMAND", "k", "v"});
+
+  test::Require(!slave.ApplyRecordViaDispatcherForTest(record, 1000),
+                "dispatcher errors are rejected");
+  test::Require(!engine.Get("k", 1000).has_value(),
+                "unknown command does not mutate data");
 }
 
 CACHE_TEST(SlaveApplySaturatedExpireDoesNotDeleteKey) {

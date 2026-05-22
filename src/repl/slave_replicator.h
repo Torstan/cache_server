@@ -19,6 +19,8 @@ class SlaveReplicator {
   void EnqueueFrame(Frame frame);
   void ApplyLogForTest(std::size_t slot_id, const cache::BinlogRecord& record,
                        std::uint64_t now_us);
+  bool ApplyRecordViaDispatcherForTest(const cache::BinlogRecord& record,
+                                       std::uint64_t now_us);
   std::uint64_t AppliedSeqForTest(std::size_t slot_id) const;
   std::size_t WorkerForSlotForTest(std::size_t slot_id) const;
 
