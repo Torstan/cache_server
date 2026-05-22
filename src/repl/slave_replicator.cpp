@@ -3,9 +3,12 @@
 #include <charconv>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
+#include "cache/redis_object.h"
 #include "common/time.h"
 
 namespace repl {
@@ -48,6 +51,14 @@ bool RelativeExpireSeconds(const cache::BinlogRecord& record,
     return ParseInt64(record.args[2], seconds);
   }
   return false;
+}
+
+cache::RedisObject PreserveDeadline(cache::RedisObject object,
+                                    std::uint64_t deadline_us) {
+  if (deadline_us == 0) {
+    return object;
+  }
+  return object.WithDeadline(deadline_us);
 }
 
 }  // namespace
@@ -138,7 +149,10 @@ bool SlaveReplicator::ApplyRecord(const cache::BinlogRecord& record,
   switch (record.op) {
     case cache::BinlogOp::kSet:
       if (record.args.size() == 3) {
-        engine_->SetString(record.args[1], record.args[2], now_us);
+        cache::BinlogRecord replay_record = record;
+        engine_->Set(record.args[1],
+                     cache::RedisObject::MakeString(record.args[2]),
+                     std::move(replay_record), now_us);
         return true;
       }
       break;
@@ -160,13 +174,59 @@ bool SlaveReplicator::ApplyRecord(const cache::BinlogRecord& record,
       break;
     case cache::BinlogOp::kHSet:
       if (record.args.size() == 4) {
-        engine_->HSet(record.args[1], record.args[2], record.args[3], now_us);
+        cache::BinlogRecord replay_record = record;
+        engine_->Update(
+            record.args[1],
+            [&](std::optional<cache::RedisObject> existing)
+                -> std::optional<cache::RedisObject> {
+              cache::HashValue hash;
+              std::uint64_t deadline_us = 0;
+              if (existing) {
+                const cache::HashValue* existing_hash = existing->Hash();
+                if (existing->Type() != cache::RedisObjectType::kHash ||
+                    existing_hash == nullptr) {
+                  return std::nullopt;
+                }
+                hash = *existing_hash;
+                deadline_us = existing->DeadlineUs();
+              }
+              cache::HashValue next =
+                  hash.Set(cache::PackedString(record.args[2]),
+                           cache::PackedString(record.args[3]));
+              return PreserveDeadline(
+                  cache::RedisObject::MakeHash(std::move(next)), deadline_us);
+            },
+            std::move(replay_record), now_us);
         return true;
       }
       break;
     case cache::BinlogOp::kSAdd:
       if (record.args.size() == 3) {
-        engine_->SAdd(record.args[1], record.args[2], now_us);
+        cache::BinlogRecord replay_record = record;
+        engine_->Update(
+            record.args[1],
+            [&](std::optional<cache::RedisObject> existing)
+                -> std::optional<cache::RedisObject> {
+              cache::SetValue set;
+              std::uint64_t deadline_us = 0;
+              const cache::PackedString member(record.args[2]);
+              if (existing) {
+                const cache::SetValue* existing_set = existing->Set();
+                if (existing->Type() != cache::RedisObjectType::kSet ||
+                    existing_set == nullptr) {
+                  return std::nullopt;
+                }
+                set = *existing_set;
+                deadline_us = existing->DeadlineUs();
+                if (set.Contains(member)) {
+                  return std::nullopt;
+                }
+              }
+              cache::SetValue next = set.Add(member);
+              return PreserveDeadline(
+                  cache::RedisObject::MakeSet(std::move(next)), deadline_us);
+            },
+            std::move(replay_record), now_us);
         return true;
       }
       break;
@@ -174,7 +234,29 @@ bool SlaveReplicator::ApplyRecord(const cache::BinlogRecord& record,
       if (record.args.size() == 4) {
         double score = 0.0;
         if (ParseDouble(record.args[2], &score)) {
-          engine_->ZAdd(record.args[1], score, record.args[3], now_us);
+          cache::BinlogRecord replay_record = record;
+          engine_->Update(
+              record.args[1],
+              [&](std::optional<cache::RedisObject> existing)
+                  -> std::optional<cache::RedisObject> {
+                cache::ZSetValue zset;
+                std::uint64_t deadline_us = 0;
+                if (existing) {
+                  const cache::ZSetValue* existing_zset = existing->ZSet();
+                  if (existing->Type() != cache::RedisObjectType::kZSet ||
+                      existing_zset == nullptr) {
+                    return std::nullopt;
+                  }
+                  zset = *existing_zset;
+                  deadline_us = existing->DeadlineUs();
+                }
+                cache::ZSetValue next =
+                    zset.Set(cache::PackedString(record.args[3]), score);
+                return PreserveDeadline(
+                    cache::RedisObject::MakeZSet(std::move(next)),
+                    deadline_us);
+              },
+              std::move(replay_record), now_us);
           return true;
         }
       }
