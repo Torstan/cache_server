@@ -27,22 +27,6 @@ class CacheEngine {
           updater,
       BinlogRecord record, std::uint64_t now_us);
 
-  ReadResult<std::string> GetString(std::string_view key,
-                                    std::uint64_t now_us) const;
-  WriteResult SetString(std::string_view key, std::string_view value,
-                        std::uint64_t now_us);
-  WriteResult HSet(std::string_view key, std::string_view field,
-                   std::string_view value, std::uint64_t now_us);
-  ReadResult<std::string> HGet(std::string_view key, std::string_view field,
-                               std::uint64_t now_us) const;
-  WriteResult SAdd(std::string_view key, std::string_view member,
-                   std::uint64_t now_us);
-  ReadResult<bool> SIsMember(std::string_view key, std::string_view member,
-                             std::uint64_t now_us) const;
-  WriteResult ZAdd(std::string_view key, double score, std::string_view member,
-                   std::uint64_t now_us);
-  ReadResult<double> ZScore(std::string_view key, std::string_view member,
-                            std::uint64_t now_us) const;
   WriteResult Del(std::string_view key, std::uint64_t now_us);
   std::size_t DeleteExpiredInSlot(std::size_t slot_id, std::size_t max_keys,
                                   std::uint64_t now_us);

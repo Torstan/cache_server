@@ -31,50 +31,6 @@ WriteResult CacheEngine::Update(
                                 now_us);
 }
 
-ReadResult<std::string> CacheEngine::GetString(std::string_view key,
-                                               std::uint64_t now_us) const {
-  return SlotForKey(key).GetString(key, now_us);
-}
-
-WriteResult CacheEngine::SetString(std::string_view key,
-                                   std::string_view value,
-                                   std::uint64_t now_us) {
-  return SlotForKey(key).SetString(key, value, now_us);
-}
-
-WriteResult CacheEngine::HSet(std::string_view key, std::string_view field,
-                              std::string_view value, std::uint64_t now_us) {
-  return SlotForKey(key).HSet(key, field, value, now_us);
-}
-
-ReadResult<std::string> CacheEngine::HGet(std::string_view key,
-                                          std::string_view field,
-                                          std::uint64_t now_us) const {
-  return SlotForKey(key).HGet(key, field, now_us);
-}
-
-WriteResult CacheEngine::SAdd(std::string_view key, std::string_view member,
-                              std::uint64_t now_us) {
-  return SlotForKey(key).SAdd(key, member, now_us);
-}
-
-ReadResult<bool> CacheEngine::SIsMember(std::string_view key,
-                                        std::string_view member,
-                                        std::uint64_t now_us) const {
-  return SlotForKey(key).SIsMember(key, member, now_us);
-}
-
-WriteResult CacheEngine::ZAdd(std::string_view key, double score,
-                              std::string_view member, std::uint64_t now_us) {
-  return SlotForKey(key).ZAdd(key, score, member, now_us);
-}
-
-ReadResult<double> CacheEngine::ZScore(std::string_view key,
-                                       std::string_view member,
-                                       std::uint64_t now_us) const {
-  return SlotForKey(key).ZScore(key, member, now_us);
-}
-
 WriteResult CacheEngine::Del(std::string_view key, std::uint64_t now_us) {
   return SlotForKey(key).Del(key, now_us);
 }
