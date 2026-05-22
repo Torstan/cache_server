@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -15,6 +16,16 @@ namespace cache {
 class CacheEngine {
  public:
   CacheEngine();
+
+  std::optional<RedisObject> Get(std::string_view key,
+                                 std::uint64_t now_us) const;
+  WriteResult Set(std::string_view key, RedisObject obj, BinlogRecord record,
+                  std::uint64_t now_us);
+  WriteResult Update(
+      std::string_view key,
+      std::function<std::optional<RedisObject>(std::optional<RedisObject>)>
+          updater,
+      BinlogRecord record, std::uint64_t now_us);
 
   ReadResult<std::string> GetString(std::string_view key,
                                     std::uint64_t now_us) const;

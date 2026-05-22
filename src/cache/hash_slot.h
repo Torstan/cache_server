@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -19,6 +20,16 @@ struct SlotSnapshot {
 
 class HashSlot {
  public:
+  std::optional<RedisObject> Get(std::string_view key,
+                                 std::uint64_t now_us) const;
+  WriteResult Set(std::string_view key, RedisObject obj, BinlogRecord record,
+                  std::uint64_t now_us);
+  WriteResult Update(
+      std::string_view key,
+      std::function<std::optional<RedisObject>(std::optional<RedisObject>)>
+          updater,
+      BinlogRecord record, std::uint64_t now_us);
+
   WriteResult SetString(std::string_view key, std::string_view value,
                         std::uint64_t now_us);
   ReadResult<std::string> GetString(std::string_view key,

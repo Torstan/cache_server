@@ -1,5 +1,7 @@
 #include "cache/cache_engine.h"
 
+#include <utility>
+
 namespace cache {
 
 CacheEngine::CacheEngine() {
@@ -7,6 +9,26 @@ CacheEngine::CacheEngine() {
   for (std::size_t i = 0; i < common::kSlotCount; ++i) {
     slots_.push_back(std::make_unique<HashSlot>());
   }
+}
+
+std::optional<RedisObject> CacheEngine::Get(std::string_view key,
+                                            std::uint64_t now_us) const {
+  return SlotForKey(key).Get(key, now_us);
+}
+
+WriteResult CacheEngine::Set(std::string_view key, RedisObject obj,
+                             BinlogRecord record,
+                             std::uint64_t now_us) {
+  return SlotForKey(key).Set(key, std::move(obj), std::move(record), now_us);
+}
+
+WriteResult CacheEngine::Update(
+    std::string_view key,
+    std::function<std::optional<RedisObject>(std::optional<RedisObject>)>
+        updater,
+    BinlogRecord record, std::uint64_t now_us) {
+  return SlotForKey(key).Update(key, std::move(updater), std::move(record),
+                                now_us);
 }
 
 ReadResult<std::string> CacheEngine::GetString(std::string_view key,

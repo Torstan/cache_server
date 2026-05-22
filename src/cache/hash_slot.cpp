@@ -55,6 +55,83 @@ RedisObject PreserveDeadline(RedisObject object, std::uint64_t deadline_us) {
 
 }  // namespace
 
+std::optional<RedisObject> HashSlot::Get(std::string_view key,
+                                         std::uint64_t now_us) const {
+  const PackedString packed_key(key);
+  std::lock_guard<std::mutex> value_lock(value_mutex_);
+  const RedisObject* found = redis_obj_map_.Find(packed_key);
+  if (found == nullptr || found->IsExpired(now_us)) {
+    return std::nullopt;
+  }
+  return *found;
+}
+
+WriteResult HashSlot::Set(std::string_view key, RedisObject obj,
+                          BinlogRecord record, std::uint64_t now_us) {
+  (void)now_us;
+  const PackedString packed_key(key);
+  std::lock_guard<std::mutex> write_lock(write_mutex_);
+  ObjectMap next_map;
+  bool created = false;
+  {
+    std::lock_guard<std::mutex> value_lock(value_mutex_);
+    created = redis_obj_map_.Find(packed_key) == nullptr;
+    next_map = redis_obj_map_.Set(packed_key, std::move(obj));
+  }
+
+  const std::uint64_t next_seq = slot_seq_ + 1;
+  record.seq = next_seq;
+  binlog_buffer_.Append(std::move(record));
+  slot_seq_ = next_seq;
+
+  {
+    std::lock_guard<std::mutex> value_lock(value_mutex_);
+    redis_obj_map_ = std::move(next_map);
+    published_seq_ = next_seq;
+  }
+  return WriteResult{Status::kOk, true, created, next_seq};
+}
+
+WriteResult HashSlot::Update(
+    std::string_view key,
+    std::function<std::optional<RedisObject>(std::optional<RedisObject>)>
+        updater,
+    BinlogRecord record, std::uint64_t now_us) {
+  const PackedString packed_key(key);
+  std::lock_guard<std::mutex> write_lock(write_mutex_);
+
+  ObjectMap current_map;
+  std::optional<RedisObject> existing;
+  {
+    std::lock_guard<std::mutex> value_lock(value_mutex_);
+    current_map = redis_obj_map_;
+    const RedisObject* found = redis_obj_map_.Find(packed_key);
+    if (found != nullptr && !found->IsExpired(now_us)) {
+      existing = *found;
+    }
+  }
+
+  const bool created = !existing.has_value();
+  std::optional<RedisObject> new_obj = updater(std::move(existing));
+  if (!new_obj) {
+    return WriteResult{Status::kOk, false, false, slot_seq_};
+  }
+
+  const std::uint64_t next_seq = slot_seq_ + 1;
+  ObjectMap next_map = current_map.Set(packed_key, std::move(*new_obj));
+
+  record.seq = next_seq;
+  binlog_buffer_.Append(std::move(record));
+  slot_seq_ = next_seq;
+
+  {
+    std::lock_guard<std::mutex> value_lock(value_mutex_);
+    redis_obj_map_ = std::move(next_map);
+    published_seq_ = next_seq;
+  }
+  return WriteResult{Status::kOk, true, created, next_seq};
+}
+
 WriteResult HashSlot::SetString(std::string_view key, std::string_view value,
                                 std::uint64_t now_us) {
   (void)now_us;
