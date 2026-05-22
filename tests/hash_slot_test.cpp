@@ -1,5 +1,8 @@
 #include "test_harness.h"
 
+#include <string>
+
+#include "cache/binlog.h"
 #include "cache/hash_slot.h"
 #include "common/hash.h"
 
@@ -12,13 +15,21 @@ CACHE_TEST(HashSlotPublishesWriteAndBinlogAtomically) {
   cache::HashSlot slot;
   const std::uint64_t now_us = 1000;
 
-  cache::WriteResult result = slot.SetString("key", "value", now_us);
+  cache::BinlogRecord record;
+  record.op = cache::BinlogOp::kSet;
+  record.args = {"SET", "key", "value"};
+
+  cache::WriteResult result = slot.Set(
+      "key", cache::RedisObject::MakeString("value"), std::move(record),
+      now_us);
   test::Require(result.changed, "SET changes slot");
   test::Require(result.seq == 1, "first write seq is 1");
 
-  auto read = slot.GetString("key", now_us);
-  test::Require(read.status == cache::Status::kOk, "string key exists");
-  test::RequireEqual(read.value, "value", "string value");
+  auto read = slot.Get("key", now_us);
+  test::Require(read.has_value(), "string key exists");
+  const cache::PackedString* value = read->StringValue();
+  test::Require(value != nullptr, "string value exists");
+  test::RequireEqual(value->ToString(), std::string("value"), "string value");
 
   auto logs = slot.CopyLogsAfter(0, 10);
   test::Require(logs.size() == 1, "one log exists");
