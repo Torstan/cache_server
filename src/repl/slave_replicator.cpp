@@ -140,6 +140,25 @@ void SlaveReplicator::ApplyLogOnWorker(std::size_t worker_id,
   }
 }
 
+bool SlaveReplicator::ApplyRecordViaDispatcher(
+    const cache::BinlogRecord& record, std::uint64_t now_us) {
+  if (engine_ == nullptr || record.args.empty()) {
+    return false;
+  }
+
+  std::vector<std::string_view> args;
+  args.reserve(record.args.size());
+  for (const std::string& arg : record.args) {
+    args.push_back(arg);
+  }
+
+  protocol::Response response = dispatcher_.Execute(args, *engine_, now_us);
+
+  return response.type == protocol::ResponseType::kSimpleString ||
+         response.type == protocol::ResponseType::kInteger ||
+         response.type == protocol::ResponseType::kBulkString;
+}
+
 bool SlaveReplicator::ApplyRecord(const cache::BinlogRecord& record,
                                   std::uint64_t now_us) {
   if (engine_ == nullptr) {

@@ -125,6 +125,27 @@ CACHE_TEST(SlaveApplyDoesNotAdvanceSeqForMalformedLog) {
                 "malformed log does not mutate data");
 }
 
+CACHE_TEST(SlaveApplyViaCommandDispatcher) {
+  cache::CacheEngine engine;
+  repl::SlaveReplicator slave(&engine, 1);
+
+  cache::BinlogRecord record;
+  record.seq = 1;
+  record.op = cache::BinlogOp::kSet;
+  record.args = {"SET", "key1", "value1"};
+
+  const std::size_t slot = common::SlotForKey("key1");
+  slave.ApplyLogForTest(slot, record, 1000000);
+
+  auto result = engine.Get("key1", 1000000);
+  test::Require(result.has_value(), "key exists");
+  test::Require(result->Type() == cache::RedisObjectType::kString,
+                "is string");
+  const cache::PackedString* value = result->StringValue();
+  test::RequireEqual(value->ToString(), std::string("value1"),
+                     "value matches");
+}
+
 CACHE_TEST(SlaveApplySaturatedExpireDoesNotDeleteKey) {
   cache::CacheEngine engine;
   repl::SlaveReplicator slave(&engine, 4);

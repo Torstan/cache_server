@@ -7,6 +7,7 @@
 
 #include "cache/binlog.h"
 #include "cache/cache_engine.h"
+#include "command/command_dispatcher.h"
 #include "repl/repl_frame.h"
 
 namespace repl {
@@ -32,12 +33,15 @@ class SlaveReplicator {
   void ApplyLogOnWorker(std::size_t worker_id, std::size_t slot_id,
                         const cache::BinlogRecord& record,
                         std::uint64_t now_us);
+  bool ApplyRecordViaDispatcher(const cache::BinlogRecord& record,
+                                std::uint64_t now_us);
   bool ApplyRecord(const cache::BinlogRecord& record, std::uint64_t now_us);
   std::size_t WorkerForSlot(std::size_t slot_id) const;
   SlotApplyState& StateForSlot(std::size_t slot_id);
   const SlotApplyState* FindStateForSlot(std::size_t slot_id) const;
 
   cache::CacheEngine* engine_;
+  command::CommandDispatcher dispatcher_;
   std::size_t apply_workers_;
   std::vector<SlotApplyState> slot_states_;
   std::vector<std::size_t> slot_worker_;
