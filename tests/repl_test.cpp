@@ -125,6 +125,23 @@ CACHE_TEST(SlaveApplyDoesNotAdvanceSeqForMalformedLog) {
                 "malformed log does not mutate data");
 }
 
+CACHE_TEST(SlaveApplyRejectsMismatchedCommandName) {
+  cache::CacheEngine engine;
+  repl::SlaveReplicator slave(&engine, 4);
+
+  WriteString(engine, "k", "v", 1000);
+  cache::BinlogRecord mismatch =
+      MakeRecord(1, cache::BinlogOp::kDel, {"GET", "k"});
+
+  const std::size_t slot = common::SlotForKey("k");
+  slave.ApplyLogForTest(slot, mismatch, 1000);
+
+  test::Require(slave.AppliedSeqForTest(slot) == 0,
+                "mismatched command does not advance seq");
+  test::Require(engine.Get("k", 1000).has_value(),
+                "mismatched command does not delete key");
+}
+
 CACHE_TEST(SlaveApplyViaCommandDispatcher) {
   cache::CacheEngine engine;
   repl::SlaveReplicator slave(&engine, 1);

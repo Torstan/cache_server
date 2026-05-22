@@ -1,9 +1,11 @@
 #include "repl/slave_replicator.h"
 
+#include <cctype>
 #include <charconv>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "common/time.h"
@@ -41,6 +43,42 @@ bool RelativeExpireSeconds(const cache::BinlogRecord& record,
     return ParseInt64(record.args[2], seconds);
   }
   return false;
+}
+
+std::string_view CommandNameForOp(cache::BinlogOp op) {
+  switch (op) {
+    case cache::BinlogOp::kSet:
+      return "SET";
+    case cache::BinlogOp::kDel:
+      return "DEL";
+    case cache::BinlogOp::kExpire:
+      return "EXPIRE";
+    case cache::BinlogOp::kHSet:
+      return "HSET";
+    case cache::BinlogOp::kSAdd:
+      return "SADD";
+    case cache::BinlogOp::kZAdd:
+      return "ZADD";
+  }
+  return "";
+}
+
+bool EqualsAsciiCaseInsensitive(std::string_view lhs, std::string_view rhs) {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < lhs.size(); ++i) {
+    const unsigned char left = static_cast<unsigned char>(lhs[i]);
+    const unsigned char right = static_cast<unsigned char>(rhs[i]);
+    if (std::toupper(left) != std::toupper(right)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool CommandNameMatchesOp(const cache::BinlogRecord& record) {
+  return EqualsAsciiCaseInsensitive(record.args[0], CommandNameForOp(record.op));
 }
 
 }  // namespace
@@ -130,6 +168,10 @@ void SlaveReplicator::ApplyLogOnWorker(std::size_t worker_id,
 bool SlaveReplicator::ApplyRecordViaDispatcher(
     const cache::BinlogRecord& record, std::uint64_t now_us) {
   if (engine_ == nullptr || record.args.empty()) {
+    return false;
+  }
+  // repl_frame owns op parsing until the command-agnostic log format lands.
+  if (!CommandNameMatchesOp(record)) {
     return false;
   }
 
