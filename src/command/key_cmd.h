@@ -11,6 +11,9 @@ class DelCmd : public RedisCmd {
   protocol::Response ExecCmd(
       const std::vector<std::string_view>& args, cache::CacheEngine& engine,
       std::uint64_t now_us) const override;
+  CommandResult ExecWithResult(
+      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+      std::uint64_t now_us) const override;
 };
 
 class ExpireCmd : public RedisCmd {
@@ -18,6 +21,9 @@ class ExpireCmd : public RedisCmd {
   std::optional<std::string> CheckArity(
       const std::vector<std::string_view>& args) const override;
   protocol::Response ExecCmd(
+      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+      std::uint64_t now_us) const override;
+  CommandResult ExecWithResult(
       const std::vector<std::string_view>& args, cache::CacheEngine& engine,
       std::uint64_t now_us) const override;
 };

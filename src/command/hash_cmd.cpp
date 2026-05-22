@@ -25,6 +25,12 @@ std::optional<std::string> HSetCmd::CheckArity(
 protocol::Response HSetCmd::ExecCmd(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
+  return ExecWithResult(args, engine, now_us).response;
+}
+
+CommandResult HSetCmd::ExecWithResult(
+    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+    std::uint64_t now_us) const {
   std::string_view key = args[1], field = args[2], value = args[3];
   bool created = false;
   bool wrong_type = false;
@@ -33,7 +39,7 @@ protocol::Response HSetCmd::ExecCmd(
   record.args = {"HSET", std::string(key), std::string(field),
                  std::string(value)};
 
-  engine.Update(
+  cache::WriteResult result = engine.Update(
       key,
       [&](std::optional<cache::RedisObject> existing)
           -> std::optional<cache::RedisObject> {
@@ -60,9 +66,10 @@ protocol::Response HSetCmd::ExecCmd(
       std::move(record), now_us);
 
   if (wrong_type) {
-    return protocol::Response::Error(kWrongTypeError);
+    return CommandResult{protocol::Response::Error(kWrongTypeError), false};
   }
-  return protocol::Response::Integer(created ? 1 : 0);
+  return CommandResult{protocol::Response::Integer(created ? 1 : 0),
+                       result.changed};
 }
 
 std::optional<std::string> HGetCmd::CheckArity(

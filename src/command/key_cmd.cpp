@@ -15,8 +15,15 @@ std::optional<std::string> DelCmd::CheckArity(
 protocol::Response DelCmd::ExecCmd(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
+  return ExecWithResult(args, engine, now_us).response;
+}
+
+CommandResult DelCmd::ExecWithResult(
+    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+    std::uint64_t now_us) const {
   auto result = engine.Del(args[1], now_us);
-  return protocol::Response::Integer(result.changed ? 1 : 0);
+  return CommandResult{protocol::Response::Integer(result.changed ? 1 : 0),
+                       result.changed};
 }
 
 std::optional<std::string> ExpireCmd::CheckArity(
@@ -30,13 +37,20 @@ std::optional<std::string> ExpireCmd::CheckArity(
 protocol::Response ExpireCmd::ExecCmd(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
+  return ExecWithResult(args, engine, now_us).response;
+}
+
+CommandResult ExpireCmd::ExecWithResult(
+    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+    std::uint64_t now_us) const {
   std::int64_t seconds = 0;
   if (!common::ParseInt64(args[2], &seconds)) {
-    return protocol::Response::Error(
-        "ERR value is not an integer or out of range");
+    return CommandResult{
+        protocol::Response::Error("ERR value is not an integer or out of range"),
+        false};
   }
   bool ok = engine.Expire(args[1], seconds, now_us);
-  return protocol::Response::Integer(ok ? 1 : 0);
+  return CommandResult{protocol::Response::Integer(ok ? 1 : 0), ok};
 }
 
 std::optional<std::string> TtlCmd::CheckArity(

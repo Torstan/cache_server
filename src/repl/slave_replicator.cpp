@@ -205,8 +205,6 @@ bool SlaveReplicator::ApplyRecordViaDispatcher(
   if (write_slot != slot_id) {
     return false;
   }
-  const std::uint64_t before_seq =
-      engine_->SlotById(write_slot).Snapshot().published_seq;
 
   std::vector<std::string_view> args;
   args.reserve(owned_args.size());
@@ -214,11 +212,12 @@ bool SlaveReplicator::ApplyRecordViaDispatcher(
     args.push_back(arg);
   }
 
-  protocol::Response response = dispatcher_.Execute(args, *engine_, now_us);
-  if (response.type == protocol::ResponseType::kError) {
+  command::CommandResult result =
+      dispatcher_.ExecuteWithResult(args, *engine_, now_us);
+  if (result.response.type == protocol::ResponseType::kError) {
     return false;
   }
-  return engine_->SlotById(write_slot).Snapshot().published_seq > before_seq;
+  return result.wrote;
 }
 
 bool SlaveReplicator::ApplyRecord(const cache::BinlogRecord& record,

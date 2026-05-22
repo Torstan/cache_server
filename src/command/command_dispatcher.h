@@ -21,6 +21,12 @@ class CommandDispatcher {
   protocol::Response Execute(const std::vector<std::string_view>& args,
                              cache::CacheEngine& engine,
                              std::uint64_t now_us) const;
+  CommandResult ExecuteWithResult(const std::vector<std::string>& args,
+                                  cache::CacheEngine& engine,
+                                  std::uint64_t now_us) const;
+  CommandResult ExecuteWithResult(const std::vector<std::string_view>& args,
+                                  cache::CacheEngine& engine,
+                                  std::uint64_t now_us) const;
 
  private:
   struct CommandEntry {

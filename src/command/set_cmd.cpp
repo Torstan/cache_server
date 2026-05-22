@@ -25,6 +25,12 @@ std::optional<std::string> SAddCmd::CheckArity(
 protocol::Response SAddCmd::ExecCmd(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
+  return ExecWithResult(args, engine, now_us).response;
+}
+
+CommandResult SAddCmd::ExecWithResult(
+    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+    std::uint64_t now_us) const {
   std::string_view key = args[1], member = args[2];
   bool added = false;
   bool wrong_type = false;
@@ -32,7 +38,7 @@ protocol::Response SAddCmd::ExecCmd(
   record.op = cache::BinlogOp::kSAdd;
   record.args = {"SADD", std::string(key), std::string(member)};
 
-  engine.Update(
+  cache::WriteResult result = engine.Update(
       key,
       [&](std::optional<cache::RedisObject> existing)
           -> std::optional<cache::RedisObject> {
@@ -59,9 +65,10 @@ protocol::Response SAddCmd::ExecCmd(
       std::move(record), now_us);
 
   if (wrong_type) {
-    return protocol::Response::Error(kWrongTypeError);
+    return CommandResult{protocol::Response::Error(kWrongTypeError), false};
   }
-  return protocol::Response::Integer(added ? 1 : 0);
+  return CommandResult{protocol::Response::Integer(added ? 1 : 0),
+                       result.changed};
 }
 
 std::optional<std::string> SIsMemberCmd::CheckArity(

@@ -45,9 +45,16 @@ std::optional<std::string> ZAddCmd::CheckArity(
 protocol::Response ZAddCmd::ExecCmd(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
+  return ExecWithResult(args, engine, now_us).response;
+}
+
+CommandResult ZAddCmd::ExecWithResult(
+    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+    std::uint64_t now_us) const {
   double score = 0.0;
   if (!common::ParseFiniteDouble(args[2], &score)) {
-    return protocol::Response::Error("ERR value is not a valid float");
+    return CommandResult{
+        protocol::Response::Error("ERR value is not a valid float"), false};
   }
 
   std::string_view key = args[1], member = args[3];
@@ -58,7 +65,7 @@ protocol::Response ZAddCmd::ExecCmd(
   record.args = {"ZADD", std::string(key), FormatScore(score),
                  std::string(member)};
 
-  engine.Update(
+  cache::WriteResult result = engine.Update(
       key,
       [&](std::optional<cache::RedisObject> existing)
           -> std::optional<cache::RedisObject> {
@@ -84,9 +91,10 @@ protocol::Response ZAddCmd::ExecCmd(
       std::move(record), now_us);
 
   if (wrong_type) {
-    return protocol::Response::Error(kWrongTypeError);
+    return CommandResult{protocol::Response::Error(kWrongTypeError), false};
   }
-  return protocol::Response::Integer(created ? 1 : 0);
+  return CommandResult{protocol::Response::Integer(created ? 1 : 0),
+                       result.changed};
 }
 
 std::optional<std::string> ZScoreCmd::CheckArity(

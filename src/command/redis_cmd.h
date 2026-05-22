@@ -11,6 +11,11 @@
 
 namespace command {
 
+struct CommandResult {
+  protocol::Response response;
+  bool wrote = false;
+};
+
 class RedisCmd {
  public:
   virtual ~RedisCmd() = default;
@@ -21,6 +26,10 @@ class RedisCmd {
   virtual protocol::Response ExecCmd(
       const std::vector<std::string_view>& args, cache::CacheEngine& engine,
       std::uint64_t now_us) const = 0;
+
+  virtual CommandResult ExecWithResult(
+      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+      std::uint64_t now_us) const;
 };
 
 }  // namespace command

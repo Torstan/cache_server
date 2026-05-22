@@ -31,6 +31,17 @@ protocol::Response Exec(command::CommandDispatcher& dispatcher,
   return dispatcher.Execute(owned_args, engine, now_us);
 }
 
+command::CommandResult ExecResult(
+    command::CommandDispatcher& dispatcher, cache::CacheEngine& engine,
+    std::uint64_t now_us, std::initializer_list<std::string_view> args) {
+  std::vector<std::string> owned_args;
+  owned_args.reserve(args.size());
+  for (std::string_view arg : args) {
+    owned_args.emplace_back(arg);
+  }
+  return dispatcher.ExecuteWithResult(owned_args, engine, now_us);
+}
+
 }  // namespace
 
 CACHE_TEST(StringAndKeyCommandsMatchRedisSubset) {
@@ -228,4 +239,30 @@ CACHE_TEST(CommandDispatcherParsesAndExecutesRespArgs) {
   auto unknown = Exec(dispatcher, engine, now_us, {"NOPE", "a"});
   test::Require(unknown.type == protocol::ResponseType::kError,
                 "unknown command returns error");
+}
+
+CACHE_TEST(CommandDispatcherReportsWriteResults) {
+  cache::CacheEngine engine;
+  command::CommandDispatcher dispatcher;
+  const std::uint64_t now_us = 1000;
+
+  auto set = ExecResult(dispatcher, engine, now_us, {"SET", "k", "v"});
+  test::Require(set.wrote, "SET reports write");
+
+  auto get = ExecResult(dispatcher, engine, now_us, {"GET", "k"});
+  test::Require(!get.wrote, "GET reports no write");
+
+  auto sadd1 = ExecResult(dispatcher, engine, now_us, {"SADD", "s", "m"});
+  test::Require(sadd1.wrote, "new SADD reports write");
+  auto sadd2 = ExecResult(dispatcher, engine, now_us, {"SADD", "s", "m"});
+  test::Require(!sadd2.wrote, "duplicate SADD reports no write");
+
+  auto missing_del = ExecResult(dispatcher, engine, now_us, {"DEL", "missing"});
+  test::Require(!missing_del.wrote, "missing DEL reports no write");
+
+  auto missing_expire =
+      ExecResult(dispatcher, engine, now_us, {"EXPIRE", "missing", "10"});
+  test::Require(!missing_expire.wrote, "missing EXPIRE reports no write");
+  auto expire = ExecResult(dispatcher, engine, now_us, {"EXPIRE", "k", "10"});
+  test::Require(expire.wrote, "existing EXPIRE reports write");
 }

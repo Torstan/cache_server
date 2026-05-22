@@ -38,33 +38,47 @@ CommandDispatcher::CommandDispatcher() {
 protocol::Response CommandDispatcher::Execute(
     const std::vector<std::string>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
-  std::vector<std::string_view> views;
-  views.reserve(args.size());
-  for (const std::string& arg : args) {
-    views.push_back(arg);
-  }
-  return Execute(views, engine, now_us);
+  return ExecuteWithResult(args, engine, now_us).response;
 }
 
 protocol::Response CommandDispatcher::Execute(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
+  return ExecuteWithResult(args, engine, now_us).response;
+}
+
+CommandResult CommandDispatcher::ExecuteWithResult(
+    const std::vector<std::string>& args, cache::CacheEngine& engine,
+    std::uint64_t now_us) const {
+  std::vector<std::string_view> views;
+  views.reserve(args.size());
+  for (const std::string& arg : args) {
+    views.push_back(arg);
+  }
+  return ExecuteWithResult(views, engine, now_us);
+}
+
+CommandResult CommandDispatcher::ExecuteWithResult(
+    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+    std::uint64_t now_us) const {
   if (args.empty()) {
-    return protocol::Response::Error("ERR empty command");
+    return CommandResult{protocol::Response::Error("ERR empty command"), false};
   }
 
   std::string cmd_name = common::ToUpperAscii(args[0]);
   auto it = commands_.find(cmd_name);
   if (it == commands_.end()) {
-    return protocol::Response::Error("ERR unknown command '" + cmd_name + "'");
+    return CommandResult{
+        protocol::Response::Error("ERR unknown command '" + cmd_name + "'"),
+        false};
   }
 
   auto arity_error = it->second.cmd->CheckArity(args);
   if (arity_error) {
-    return protocol::Response::Error(*arity_error);
+    return CommandResult{protocol::Response::Error(*arity_error), false};
   }
 
-  return it->second.cmd->ExecCmd(args, engine, now_us);
+  return it->second.cmd->ExecWithResult(args, engine, now_us);
 }
 
 }  // namespace command

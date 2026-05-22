@@ -25,12 +25,20 @@ std::optional<std::string> SetCmd::CheckArity(
 protocol::Response SetCmd::ExecCmd(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
+  return ExecWithResult(args, engine, now_us).response;
+}
+
+CommandResult SetCmd::ExecWithResult(
+    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+    std::uint64_t now_us) const {
   cache::BinlogRecord record;
   record.op = cache::BinlogOp::kSet;
   record.args = {"SET", std::string(args[1]), std::string(args[2])};
-  engine.Set(args[1], cache::RedisObject::MakeString(args[2]),
-             std::move(record), now_us);
-  return protocol::Response::SimpleString("OK");
+  cache::WriteResult result =
+      engine.Set(args[1], cache::RedisObject::MakeString(args[2]),
+                 std::move(record), now_us);
+  return CommandResult{protocol::Response::SimpleString("OK"),
+                       result.changed};
 }
 
 std::optional<std::string> GetCmd::CheckArity(
