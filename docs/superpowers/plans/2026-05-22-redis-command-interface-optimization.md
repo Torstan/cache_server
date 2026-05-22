@@ -245,7 +245,12 @@ WriteResult HashSlot::Set(std::string_view key, RedisObject obj,
 
 - [ ] **Step 4: Implement HashSlot::Update**
 
-Updater receives `std::optional<RedisObject>` (copy of existing, or nullopt if missing/expired). Returns new object or nullopt to cancel.
+Updater receives `std::optional<RedisObject>` (copy of existing, or nullopt if missing/expired). Returns the new object to write, or nullopt to skip the write entirely.
+
+**Semantics of nullopt return:**
+- `nullopt` means "do not write anything to storage" (no binlog entry, no map change)
+- The reason for cancellation (wrong type, no-op, etc.) is the command's responsibility to track via lambda capture
+- Result.status will be `kInvalidArgument` to signal "no write happened"; commands distinguish reasons via captured state
 
 ```cpp
 WriteResult HashSlot::Update(
@@ -266,14 +271,14 @@ WriteResult HashSlot::Update(
     }
   }
 
+  const bool created = !existing.has_value();
   std::optional<RedisObject> new_obj = updater(std::move(existing));
   if (!new_obj) {
-    return WriteResult{Status::kWrongType, false, false, slot_seq_};
+    // Updater chose not to write. No binlog, no state change.
+    return WriteResult{Status::kInvalidArgument, false, false, slot_seq_};
   }
 
   const std::uint64_t next_seq = slot_seq_ + 1;
-  bool created = !current_map.Find(packed_key) ||
-                 current_map.Find(packed_key)->IsExpired(now_us);
   ObjectMap next_map = current_map.Set(packed_key, std::move(*new_obj));
 
   BinlogRecord record;
@@ -395,7 +400,7 @@ CACHE_TEST(GenericUpdateCancels) {
     return std::nullopt;
   }, now);
 
-  test::Require(r.status == cache::Status::kWrongType, "cancelled");
+  test::Require(r.status == cache::Status::kInvalidArgument, "cancelled");
   test::Require(!r.changed, "not changed");
 }
 ```
@@ -669,13 +674,17 @@ protocol::Response HSetCmd::ExecCmd(
     cache::CacheEngine& engine, std::uint64_t now_us) const {
   std::string_view key = args[1], field = args[2], value = args[3];
   bool created = false;
+  bool wrong_type = false;
 
-  auto result = engine.Update(key, [&](std::optional<cache::RedisObject> existing)
+  engine.Update(key, [&](std::optional<cache::RedisObject> existing)
       -> std::optional<cache::RedisObject> {
     cache::HashValue hash;
     std::uint64_t deadline_us = 0;
     if (existing) {
-      if (existing->Type() != cache::RedisObjectType::kHash) return std::nullopt;
+      if (existing->Type() != cache::RedisObjectType::kHash) {
+        wrong_type = true;
+        return std::nullopt;
+      }
       hash = *existing->Hash();
       deadline_us = existing->DeadlineUs();
       created = hash.Find(cache::PackedString(field)) == nullptr;
@@ -687,7 +696,7 @@ protocol::Response HSetCmd::ExecCmd(
     return deadline_us ? obj.WithDeadline(deadline_us) : obj;
   }, now_us);
 
-  if (result.status == cache::Status::kWrongType) {
+  if (wrong_type) {
     return protocol::Response::Error(
         "WRONGTYPE Operation against a key holding the wrong kind of value");
   }
@@ -744,19 +753,22 @@ protocol::Response SAddCmd::ExecCmd(
     cache::CacheEngine& engine, std::uint64_t now_us) const {
   std::string_view key = args[1], member = args[2];
   bool added = false;
+  bool wrong_type = false;
 
-  auto result = engine.Update(key, [&](std::optional<cache::RedisObject> existing)
+  engine.Update(key, [&](std::optional<cache::RedisObject> existing)
       -> std::optional<cache::RedisObject> {
     cache::SetValue set;
     std::uint64_t deadline_us = 0;
     if (existing) {
-      if (existing->Type() != cache::RedisObjectType::kSet) return std::nullopt;
+      if (existing->Type() != cache::RedisObjectType::kSet) {
+        wrong_type = true;
+        return std::nullopt;
+      }
       set = *existing->Set();
       deadline_us = existing->DeadlineUs();
       if (set.Contains(cache::PackedString(member))) {
-        added = false;
-        cache::RedisObject obj = cache::RedisObject::MakeSet(set);
-        return deadline_us ? obj.WithDeadline(deadline_us) : obj;
+        // Member already present: skip the write to avoid binlog noise.
+        return std::nullopt;
       }
     }
     added = true;
@@ -765,7 +777,7 @@ protocol::Response SAddCmd::ExecCmd(
     return deadline_us ? obj.WithDeadline(deadline_us) : obj;
   }, now_us);
 
-  if (result.status == cache::Status::kWrongType) {
+  if (wrong_type) {
     return protocol::Response::Error(
         "WRONGTYPE Operation against a key holding the wrong kind of value");
   }
@@ -804,12 +816,34 @@ protocol::Response SIsMemberCmd::ExecCmd(
 
 - [ ] **Step 2: Rewrite zset_cmd.cpp**
 
+Note: keep the existing `FormatScore` helper to match Redis-compatible output (e.g., `"3.14"` not `"3.140000"`). Existing integration tests assume this format.
+
 ```cpp
 #include "command/zset_cmd.h"
+
+#include <iomanip>
+#include <locale>
+#include <sstream>
+
 #include "cache/redis_object.h"
 #include "common/parse_utils.h"
 
 namespace command {
+namespace {
+
+std::string FormatScore(double score) {
+  std::ostringstream out;
+  out.imbue(std::locale::classic());
+  out << std::setprecision(17) << score;
+  std::string text = out.str();
+  if (text.find('.') != std::string::npos) {
+    while (!text.empty() && text.back() == '0') text.pop_back();
+    if (!text.empty() && text.back() == '.') text.pop_back();
+  }
+  return text;
+}
+
+}  // namespace
 
 std::optional<std::string> ZAddCmd::CheckArity(
     const std::vector<std::string_view>& args) const {
@@ -827,13 +861,17 @@ protocol::Response ZAddCmd::ExecCmd(
 
   std::string_view key = args[1], member = args[3];
   bool created = false;
+  bool wrong_type = false;
 
-  auto result = engine.Update(key, [&](std::optional<cache::RedisObject> existing)
+  engine.Update(key, [&](std::optional<cache::RedisObject> existing)
       -> std::optional<cache::RedisObject> {
     cache::ZSetValue zset;
     std::uint64_t deadline_us = 0;
     if (existing) {
-      if (existing->Type() != cache::RedisObjectType::kZSet) return std::nullopt;
+      if (existing->Type() != cache::RedisObjectType::kZSet) {
+        wrong_type = true;
+        return std::nullopt;
+      }
       zset = *existing->ZSet();
       deadline_us = existing->DeadlineUs();
       created = zset.Find(cache::PackedString(member)) == nullptr;
@@ -845,7 +883,7 @@ protocol::Response ZAddCmd::ExecCmd(
     return deadline_us ? obj.WithDeadline(deadline_us) : obj;
   }, now_us);
 
-  if (result.status == cache::Status::kWrongType) {
+  if (wrong_type) {
     return protocol::Response::Error(
         "WRONGTYPE Operation against a key holding the wrong kind of value");
   }
@@ -869,7 +907,7 @@ protocol::Response ZScoreCmd::ExecCmd(
   }
   const double* found = obj->ZSet()->Find(cache::PackedString(args[2]));
   if (!found) return protocol::Response::NullBulk();
-  return protocol::Response::BulkString(std::to_string(*found));
+  return protocol::Response::BulkString(FormatScore(*found));
 }
 
 }  // namespace command
