@@ -36,8 +36,9 @@ class SlaveReplicator {
                         const cache::BinlogRecord& record,
                         std::uint64_t now_us);
   bool ApplyRecordViaDispatcher(const cache::BinlogRecord& record,
-                                std::uint64_t now_us);
-  bool ApplyRecord(const cache::BinlogRecord& record, std::uint64_t now_us);
+                                std::uint64_t now_us, std::size_t slot_id);
+  bool ApplyRecord(const cache::BinlogRecord& record, std::uint64_t now_us,
+                   std::size_t slot_id);
   std::size_t WorkerForSlot(std::size_t slot_id) const;
   SlotApplyState& StateForSlot(std::size_t slot_id);
   const SlotApplyState* FindStateForSlot(std::size_t slot_id) const;

@@ -278,6 +278,29 @@ CACHE_TEST(SlaveApplyRejectsDecodedReadFrame) {
   RequireString(engine, "k", now_us, "v");
 }
 
+CACHE_TEST(SlaveApplyRejectsFrameSlotKeyMismatch) {
+  cache::CacheEngine engine;
+  repl::SlaveReplicator slave(&engine, 1);
+  const std::uint64_t now_us = 1000;
+  const std::string key = "slot_mismatch_key";
+  const std::size_t key_slot = common::SlotForKey(key);
+  const std::size_t frame_slot = key_slot == 0 ? 1 : 0;
+
+  cache::BinlogRecord record;
+  record.seq = 1;
+  record.args = {"SET", key, "v"};
+  repl::Frame frame = repl::Frame::Log(frame_slot, std::move(record));
+  auto decoded = repl::DecodeFrame(repl::EncodeFrame(frame));
+  test::Require(decoded.has_value(), "frame decodes");
+
+  slave.EnqueueFrame(std::move(*decoded));
+
+  test::Require(slave.AppliedSeqForTest(frame_slot) == 0,
+                "mismatched frame slot does not advance");
+  test::Require(!engine.Get(key, now_us).has_value(),
+                "mismatched frame slot does not mutate key");
+}
+
 CACHE_TEST(SlaveApplyViaCommandDispatcher) {
   cache::CacheEngine engine;
   repl::SlaveReplicator slave(&engine, 1);

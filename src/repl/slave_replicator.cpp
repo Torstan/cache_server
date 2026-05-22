@@ -116,7 +116,11 @@ void SlaveReplicator::ApplyLogForTest(std::size_t slot_id,
 
 bool SlaveReplicator::ApplyRecordViaDispatcherForTest(
     const cache::BinlogRecord& record, std::uint64_t now_us) {
-  return ApplyRecordViaDispatcher(record, now_us);
+  if (record.args.size() < 2) {
+    return ApplyRecordViaDispatcher(record, now_us, 0);
+  }
+  return ApplyRecordViaDispatcher(record, now_us,
+                                  common::SlotForKey(record.args[1]));
 }
 
 std::uint64_t SlaveReplicator::AppliedSeqForTest(std::size_t slot_id) const {
@@ -152,7 +156,7 @@ void SlaveReplicator::ApplyLogOnWorker(std::size_t worker_id,
     return;
   }
 
-  if (!ApplyRecord(record, now_us)) {
+  if (!ApplyRecord(record, now_us, slot_id)) {
     return;
   }
   state.applied_seq = record.seq;
@@ -164,7 +168,7 @@ void SlaveReplicator::ApplyLogOnWorker(std::size_t worker_id,
     }
     cache::BinlogRecord pending = std::move(next->second);
     state.pending.erase(next);
-    if (!ApplyRecord(pending, now_us)) {
+    if (!ApplyRecord(pending, now_us, slot_id)) {
       return;
     }
     state.applied_seq = pending.seq;
@@ -172,7 +176,8 @@ void SlaveReplicator::ApplyLogOnWorker(std::size_t worker_id,
 }
 
 bool SlaveReplicator::ApplyRecordViaDispatcher(
-    const cache::BinlogRecord& record, std::uint64_t now_us) {
+    const cache::BinlogRecord& record, std::uint64_t now_us,
+    std::size_t slot_id) {
   if (engine_ == nullptr || record.args.size() < 2) {
     return false;
   }
@@ -197,6 +202,9 @@ bool SlaveReplicator::ApplyRecordViaDispatcher(
   }
 
   const std::size_t write_slot = common::SlotForKey(owned_args[1]);
+  if (write_slot != slot_id) {
+    return false;
+  }
   const std::uint64_t before_seq =
       engine_->SlotById(write_slot).Snapshot().published_seq;
 
@@ -214,8 +222,9 @@ bool SlaveReplicator::ApplyRecordViaDispatcher(
 }
 
 bool SlaveReplicator::ApplyRecord(const cache::BinlogRecord& record,
-                                  std::uint64_t now_us) {
-  return ApplyRecordViaDispatcher(record, now_us);
+                                  std::uint64_t now_us,
+                                  std::size_t slot_id) {
+  return ApplyRecordViaDispatcher(record, now_us, slot_id);
 }
 
 std::size_t SlaveReplicator::WorkerForSlot(std::size_t slot_id) const {
