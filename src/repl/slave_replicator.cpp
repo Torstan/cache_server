@@ -81,6 +81,11 @@ bool CommandNameMatchesOp(const cache::BinlogRecord& record) {
   return EqualsAsciiCaseInsensitive(record.args[0], CommandNameForOp(record.op));
 }
 
+bool IsCommand(const cache::BinlogRecord& record, std::string_view command) {
+  return !record.args.empty() &&
+         EqualsAsciiCaseInsensitive(record.args[0], command);
+}
+
 }  // namespace
 
 SlaveReplicator::SlaveReplicator(cache::CacheEngine* engine,
@@ -170,13 +175,14 @@ bool SlaveReplicator::ApplyRecordViaDispatcher(
   if (engine_ == nullptr || record.args.empty()) {
     return false;
   }
-  // repl_frame owns op parsing until the command-agnostic log format lands.
-  if (!CommandNameMatchesOp(record)) {
+  // Non-SET op values are authoritative for manually constructed records until
+  // BinlogOp becomes optional; decoded frames use kSet as a placeholder.
+  if (record.op != cache::BinlogOp::kSet && !CommandNameMatchesOp(record)) {
     return false;
   }
 
   std::vector<std::string> owned_args = record.args;
-  if (record.op == cache::BinlogOp::kExpire &&
+  if (IsCommand(record, "EXPIRE") &&
       (owned_args.size() == 2 || owned_args.size() == 3)) {
     std::int64_t seconds = 0;
     if (!RelativeExpireSeconds(record, &seconds)) {

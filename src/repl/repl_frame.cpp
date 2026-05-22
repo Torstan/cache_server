@@ -50,7 +50,7 @@ std::optional<std::size_t> ParseSize(std::string_view text) {
 }
 
 std::optional<Frame> DecodeLog(const redis::RespValue& value) {
-  if (value.element_count < 8) {
+  if (value.element_count < 7) {
     return std::nullopt;
   }
   for (std::size_t i = 0; i < value.element_count; ++i) {
@@ -71,6 +71,9 @@ std::optional<Frame> DecodeLog(const redis::RespValue& value) {
     return std::nullopt;
   }
   if (value.element_count != 7 + *arg_count) {
+    return std::nullopt;
+  }
+  if (*arg_count > 0 && value.elements[4].text != value.elements[7].text) {
     return std::nullopt;
   }
 

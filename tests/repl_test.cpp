@@ -70,7 +70,7 @@ CACHE_TEST(ReplFrameEncodesCommandNameDirectly) {
   cache::BinlogRecord record;
   record.seq = 42;
   record.op = cache::BinlogOp::kSet;
-  record.args = {"SET", "mykey", "myvalue"};
+  record.args = {"DEL", "mykey"};
   record.remaining_ttl_us = 0;
 
   repl::Frame frame = repl::Frame::Log(5, std::move(record));
@@ -81,12 +81,10 @@ CACHE_TEST(ReplFrameEncodesCommandNameDirectly) {
   test::Require(decoded->subcmd == repl::Subcmd::kLog, "is LOG frame");
   test::Require(decoded->slot_id == 5, "slot_id preserved");
   test::Require(decoded->record.seq == 42, "seq preserved");
-  test::Require(decoded->record.args.size() == 3, "args count");
-  test::RequireEqual(decoded->record.args[0], std::string("SET"),
+  test::Require(decoded->record.args.size() == 2, "args count");
+  test::RequireEqual(decoded->record.args[0], std::string("DEL"),
                      "command name");
   test::RequireEqual(decoded->record.args[1], std::string("mykey"), "key");
-  test::RequireEqual(decoded->record.args[2], std::string("myvalue"),
-                     "value");
 }
 
 CACHE_TEST(ReplFrameDecodesUnknownCommandNameDirectly) {
@@ -111,6 +109,39 @@ CACHE_TEST(ReplFrameDecodesUnknownCommandNameDirectly) {
   test::RequireEqual(decoded->record.args[0], std::string("CUSTOM.WRITE"),
                      "command name");
   test::RequireEqual(decoded->record.args[1], std::string("mykey"), "key");
+}
+
+CACHE_TEST(ReplFrameRejectsMismatchedCommandElement) {
+  std::string wire;
+  redis::PackArrayHeader(10, &wire);
+  redis::PackBulkString("CACHE.REPL", &wire);
+  redis::PackBulkString("LOG", &wire);
+  redis::PackBulkString("5", &wire);
+  redis::PackBulkString("42", &wire);
+  redis::PackBulkString("DEL", &wire);
+  redis::PackBulkString("0", &wire);
+  redis::PackBulkString("3", &wire);
+  redis::PackBulkString("SET", &wire);
+  redis::PackBulkString("mykey", &wire);
+  redis::PackBulkString("myvalue", &wire);
+
+  test::Require(!repl::DecodeFrame(wire).has_value(),
+                "mismatched command element is rejected");
+}
+
+CACHE_TEST(ReplFrameRoundTripsEmptyArgsLog) {
+  cache::BinlogRecord record;
+  record.seq = 42;
+  record.args = {};
+
+  repl::Frame frame = repl::Frame::Log(5, std::move(record));
+  auto decoded = repl::DecodeFrame(repl::EncodeFrame(frame));
+
+  test::Require(decoded.has_value(), "empty-args frame decodes");
+  test::Require(decoded->subcmd == repl::Subcmd::kLog, "is LOG frame");
+  test::Require(decoded->slot_id == 5, "slot_id preserved");
+  test::Require(decoded->record.seq == 42, "seq preserved");
+  test::Require(decoded->record.args.empty(), "args remain empty");
 }
 
 CACHE_TEST(MasterReplicatorUsesAckToCleanLogs) {
@@ -187,6 +218,27 @@ CACHE_TEST(SlaveApplyRejectsMismatchedCommandName) {
                 "mismatched command does not advance seq");
   test::Require(engine.Get("k", 1000).has_value(),
                 "mismatched command does not delete key");
+}
+
+CACHE_TEST(SlaveApplyDecodedDelFrame) {
+  cache::CacheEngine engine;
+  repl::SlaveReplicator slave(&engine, 1);
+  const std::uint64_t now_us = 1000;
+
+  WriteString(engine, "k", "v", now_us);
+
+  cache::BinlogRecord record;
+  record.seq = 1;
+  record.args = {"DEL", "k"};
+  repl::Frame frame = repl::Frame::Log(common::SlotForKey("k"),
+                                       std::move(record));
+  auto decoded = repl::DecodeFrame(repl::EncodeFrame(frame));
+  test::Require(decoded.has_value(), "frame decodes");
+
+  slave.EnqueueFrame(std::move(*decoded));
+
+  test::Require(!engine.Get("k", now_us).has_value(),
+                "decoded DEL frame applies");
 }
 
 CACHE_TEST(SlaveApplyViaCommandDispatcher) {
