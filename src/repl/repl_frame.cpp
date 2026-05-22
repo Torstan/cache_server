@@ -145,7 +145,7 @@ std::string EncodeFrame(const Frame& frame) {
       PackBulk("LOG", &out);
       PackSize(frame.slot_id, &out);
       PackNumber(frame.record.seq, &out);
-      PackBulk(frame.record.args.empty() ? "SET" : frame.record.args[0], &out);
+      PackBulk(frame.record.args.empty() ? "" : frame.record.args[0], &out);
       PackNumber(frame.record.remaining_ttl_us, &out);
       PackSize(frame.record.args.size(), &out);
       for (const std::string& arg : frame.record.args) {

@@ -1,11 +1,7 @@
 #include "repl/slave_replicator.h"
 
-#include <cctype>
-#include <charconv>
-#include <limits>
 #include <stdexcept>
 #include <string>
-#include <string_view>
 #include <utility>
 
 #include "common/hash.h"
@@ -15,55 +11,7 @@ namespace repl {
 
 namespace {
 
-constexpr std::uint64_t kMicrosPerSecond = 1000000ULL;
-
 std::uint64_t ApplyNowUs() { return common::NowMicros(); }
-
-bool ParseInt64(const std::string& text, std::int64_t* out) {
-  const char* begin = text.data();
-  const char* end = text.data() + text.size();
-  const auto result = std::from_chars(begin, end, *out);
-  return result.ec == std::errc() && result.ptr == end;
-}
-
-bool RelativeExpireSeconds(const cache::BinlogRecord& record,
-                           std::int64_t* seconds) {
-  if (record.remaining_ttl_us > 0) {
-    const std::uint64_t rounded =
-        record.remaining_ttl_us / kMicrosPerSecond +
-        (record.remaining_ttl_us % kMicrosPerSecond == 0 ? 0 : 1);
-    if (rounded >
-        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
-      *seconds = std::numeric_limits<std::int64_t>::max();
-    } else {
-      *seconds = static_cast<std::int64_t>(rounded);
-    }
-    return true;
-  }
-  if (record.args.size() == 3) {
-    return ParseInt64(record.args[2], seconds);
-  }
-  return false;
-}
-
-bool EqualsAsciiCaseInsensitive(std::string_view lhs, std::string_view rhs) {
-  if (lhs.size() != rhs.size()) {
-    return false;
-  }
-  for (std::size_t i = 0; i < lhs.size(); ++i) {
-    const unsigned char left = static_cast<unsigned char>(lhs[i]);
-    const unsigned char right = static_cast<unsigned char>(rhs[i]);
-    if (std::toupper(left) != std::toupper(right)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-bool IsCommand(const cache::BinlogRecord& record, std::string_view command) {
-  return !record.args.empty() &&
-         EqualsAsciiCaseInsensitive(record.args[0], command);
-}
 
 }  // namespace
 
@@ -160,33 +108,21 @@ bool SlaveReplicator::ApplyRecordViaDispatcher(
     return false;
   }
 
-  std::vector<std::string> owned_args = record.args;
-  if (IsCommand(record, "EXPIRE") &&
-      (owned_args.size() == 2 || owned_args.size() == 3)) {
-    std::int64_t seconds = 0;
-    if (!RelativeExpireSeconds(record, &seconds)) {
-      return false;
-    }
-    if (owned_args.size() == 2) {
-      owned_args.push_back(std::to_string(seconds));
-    } else {
-      owned_args[2] = std::to_string(seconds);
-    }
-  }
-
-  const std::size_t write_slot = common::SlotForKey(owned_args[1]);
+  const std::size_t write_slot = common::SlotForKey(record.args[1]);
   if (write_slot != slot_id) {
     return false;
   }
 
   std::vector<std::string_view> args;
-  args.reserve(owned_args.size());
-  for (const std::string& arg : owned_args) {
+  args.reserve(record.args.size());
+  for (const std::string& arg : record.args) {
     args.push_back(arg);
   }
 
+  command::CommandReplayOptions replay_options;
+  replay_options.remaining_ttl_us = record.remaining_ttl_us;
   command::CommandResult result =
-      dispatcher_.ExecuteWithResult(args, *engine_, now_us);
+      dispatcher_.ExecuteWithResult(args, *engine_, now_us, replay_options);
   if (result.response.type == protocol::ResponseType::kError) {
     return false;
   }

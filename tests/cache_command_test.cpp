@@ -150,6 +150,32 @@ CACHE_TEST(ExpireUsesSaturatedTtlInBinlog) {
                 "EXPIRE log stores saturated remaining TTL");
 }
 
+CACHE_TEST(CommandDispatcherReplaysExpireUsingRemainingTtlMetadata) {
+  cache::CacheEngine engine;
+  command::CommandDispatcher dispatcher;
+  const std::uint64_t now_us = 1000;
+
+  (void)Exec(dispatcher, engine, now_us, {"SET", "ttl", "v"});
+
+  auto client_missing_arg = Exec(dispatcher, engine, now_us, {"EXPIRE", "ttl"});
+  test::Require(client_missing_arg.type == protocol::ResponseType::kError,
+                "normal EXPIRE still requires seconds argument");
+
+  command::CommandReplayOptions replay_options;
+  replay_options.remaining_ttl_us = std::numeric_limits<std::uint64_t>::max();
+  std::vector<std::string> replay_args = {"EXPIRE", "ttl"};
+  auto replay =
+      dispatcher.ExecuteWithResult(replay_args, engine, now_us, replay_options);
+
+  RequireType(replay.response, protocol::ResponseType::kInteger,
+              "replayed EXPIRE returns an integer");
+  test::Require(replay.response.integer == 1, "replayed EXPIRE succeeds");
+  test::Require(replay.wrote, "replayed EXPIRE reports write");
+  test::Require(Exec(dispatcher, engine, now_us + 2'000'000, {"GET", "ttl"})
+                    .type == protocol::ResponseType::kBulkString,
+                "saturated replay TTL preserves key");
+}
+
 CACHE_TEST(HashSetAndZSetCommandsMatchRedisSubset) {
   cache::CacheEngine engine;
   command::CommandDispatcher dispatcher;

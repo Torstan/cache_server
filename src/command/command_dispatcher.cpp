@@ -50,17 +50,31 @@ protocol::Response CommandDispatcher::Execute(
 CommandResult CommandDispatcher::ExecuteWithResult(
     const std::vector<std::string>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
+  return ExecuteWithResult(args, engine, now_us, {});
+}
+
+CommandResult CommandDispatcher::ExecuteWithResult(
+    const std::vector<std::string>& args, cache::CacheEngine& engine,
+    std::uint64_t now_us,
+    const CommandReplayOptions& replay_options) const {
   std::vector<std::string_view> views;
   views.reserve(args.size());
   for (const std::string& arg : args) {
     views.push_back(arg);
   }
-  return ExecuteWithResult(views, engine, now_us);
+  return ExecuteWithResult(views, engine, now_us, replay_options);
 }
 
 CommandResult CommandDispatcher::ExecuteWithResult(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
+  return ExecuteWithResult(args, engine, now_us, {});
+}
+
+CommandResult CommandDispatcher::ExecuteWithResult(
+    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+    std::uint64_t now_us,
+    const CommandReplayOptions& replay_options) const {
   if (args.empty()) {
     return CommandResult{protocol::Response::Error("ERR empty command"), false};
   }
@@ -73,12 +87,12 @@ CommandResult CommandDispatcher::ExecuteWithResult(
         false};
   }
 
-  auto arity_error = it->second.cmd->CheckArity(args);
+  auto arity_error = it->second.cmd->CheckArity(args, replay_options);
   if (arity_error) {
     return CommandResult{protocol::Response::Error(*arity_error), false};
   }
 
-  return it->second.cmd->ExecWithResult(args, engine, now_us);
+  return it->second.cmd->ExecWithResult(args, engine, now_us, replay_options);
 }
 
 }  // namespace command

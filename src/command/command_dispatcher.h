@@ -24,9 +24,17 @@ class CommandDispatcher {
   CommandResult ExecuteWithResult(const std::vector<std::string>& args,
                                   cache::CacheEngine& engine,
                                   std::uint64_t now_us) const;
+  CommandResult ExecuteWithResult(
+      const std::vector<std::string>& args, cache::CacheEngine& engine,
+      std::uint64_t now_us,
+      const CommandReplayOptions& replay_options) const;
   CommandResult ExecuteWithResult(const std::vector<std::string_view>& args,
                                   cache::CacheEngine& engine,
                                   std::uint64_t now_us) const;
+  CommandResult ExecuteWithResult(
+      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+      std::uint64_t now_us,
+      const CommandReplayOptions& replay_options) const;
 
  private:
   struct CommandEntry {

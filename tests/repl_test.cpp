@@ -1,5 +1,6 @@
 #include "test_harness.h"
 
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <map>
@@ -146,13 +147,29 @@ CACHE_TEST(ReplFrameRoundTripsEmptyArgsLog) {
   record.args = {};
 
   repl::Frame frame = repl::Frame::Log(5, std::move(record));
-  auto decoded = repl::DecodeFrame(repl::EncodeFrame(frame));
+  std::string wire = repl::EncodeFrame(frame);
+  auto decoded = repl::DecodeFrame(wire);
 
   test::Require(decoded.has_value(), "empty-args frame decodes");
   test::Require(decoded->subcmd == repl::Subcmd::kLog, "is LOG frame");
   test::Require(decoded->slot_id == 5, "slot_id preserved");
   test::Require(decoded->record.seq == 42, "seq preserved");
   test::Require(decoded->record.args.empty(), "args remain empty");
+
+  std::array<redis::RespValue, 16> scratch{};
+  redis::RespResult parsed =
+      redis::UnpackOne(wire, scratch.data(), scratch.size(), {});
+  test::Require(parsed.status == redis::RespStatus::kOk,
+                "encoded frame parses");
+  test::Require(parsed.value != nullptr, "encoded frame has value");
+  test::Require(parsed.value->type == redis::RespType::kArray,
+                "encoded frame array");
+  test::Require(parsed.value->element_count == 7,
+                "empty args log element count");
+  test::Require(parsed.value->elements[4].type == redis::RespType::kBulkString,
+                "command metadata is bulk string");
+  test::Require(parsed.value->elements[4].text.empty(),
+                "empty args log has empty command metadata");
 }
 
 CACHE_TEST(MasterReplicatorUsesAckToCleanLogs) {
