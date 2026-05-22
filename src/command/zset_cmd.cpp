@@ -3,6 +3,12 @@
 #include <iomanip>
 #include <locale>
 #include <sstream>
+#include <string>
+#include <utility>
+
+#include "cache/binlog.h"
+#include "cache/redis_object.h"
+#include "common/parse_utils.h"
 
 namespace command {
 namespace {
@@ -28,31 +34,88 @@ std::string FormatScore(double score) {
 
 }  // namespace
 
-ZAddCmd::ZAddCmd(std::string_view key, double score, std::string_view member)
-    : key_(key), score_(score), member_(member) {}
-
-protocol::Response ZAddCmd::ExecCmd(cache::CacheEngine& engine,
-                                    std::uint64_t now_us) const {
-  const auto result = engine.ZAdd(key_, score_, member_, now_us);
-  if (result.status == cache::Status::kWrongType) {
-    return protocol::Response::Error(kWrongTypeError);
+std::optional<std::string> ZAddCmd::CheckArity(
+    const std::vector<std::string_view>& args) const {
+  if (args.size() != 4) {
+    return "ERR wrong number of arguments for 'zadd' command";
   }
-  return protocol::Response::Integer(result.created ? 1 : 0);
+  return std::nullopt;
 }
 
-ZScoreCmd::ZScoreCmd(std::string_view key, std::string_view member)
-    : key_(key), member_(member) {}
-
-protocol::Response ZScoreCmd::ExecCmd(cache::CacheEngine& engine,
-                                      std::uint64_t now_us) const {
-  const auto result = engine.ZScore(key_, member_, now_us);
-  if (result.status == cache::Status::kOk) {
-    return protocol::Response::BulkString(FormatScore(result.value));
+protocol::Response ZAddCmd::ExecCmd(
+    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+    std::uint64_t now_us) const {
+  double score = 0.0;
+  if (!common::ParseFiniteDouble(args[2], &score)) {
+    return protocol::Response::Error("ERR value is not a valid float");
   }
-  if (result.status == cache::Status::kWrongType) {
+
+  std::string_view key = args[1], member = args[3];
+  bool created = false;
+  bool wrong_type = false;
+  cache::BinlogRecord record;
+  record.op = cache::BinlogOp::kZAdd;
+  record.args = {"ZADD", std::string(key), FormatScore(score),
+                 std::string(member)};
+
+  engine.Update(
+      key,
+      [&](std::optional<cache::RedisObject> existing)
+          -> std::optional<cache::RedisObject> {
+        cache::ZSetValue zset;
+        std::uint64_t deadline_us = 0;
+        if (existing) {
+          const cache::ZSetValue* existing_zset = existing->ZSet();
+          if (existing->Type() != cache::RedisObjectType::kZSet ||
+              existing_zset == nullptr) {
+            wrong_type = true;
+            return std::nullopt;
+          }
+          zset = *existing_zset;
+          deadline_us = existing->DeadlineUs();
+          created = zset.Find(cache::PackedString(member)) == nullptr;
+        } else {
+          created = true;
+        }
+        cache::ZSetValue next = zset.Set(cache::PackedString(member), score);
+        cache::RedisObject obj = cache::RedisObject::MakeZSet(std::move(next));
+        return deadline_us ? obj.WithDeadline(deadline_us) : obj;
+      },
+      std::move(record), now_us);
+
+  if (wrong_type) {
     return protocol::Response::Error(kWrongTypeError);
   }
-  return protocol::Response::NullBulk();
+  return protocol::Response::Integer(created ? 1 : 0);
+}
+
+std::optional<std::string> ZScoreCmd::CheckArity(
+    const std::vector<std::string_view>& args) const {
+  if (args.size() != 3) {
+    return "ERR wrong number of arguments for 'zscore' command";
+  }
+  return std::nullopt;
+}
+
+protocol::Response ZScoreCmd::ExecCmd(
+    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+    std::uint64_t now_us) const {
+  auto obj = engine.Get(args[1], now_us);
+  if (!obj) {
+    return protocol::Response::NullBulk();
+  }
+  if (obj->Type() != cache::RedisObjectType::kZSet) {
+    return protocol::Response::Error(kWrongTypeError);
+  }
+  const cache::ZSetValue* zset = obj->ZSet();
+  if (zset == nullptr) {
+    return protocol::Response::Error(kWrongTypeError);
+  }
+  const double* found = zset->Find(cache::PackedString(args[2]));
+  if (!found) {
+    return protocol::Response::NullBulk();
+  }
+  return protocol::Response::BulkString(FormatScore(*found));
 }
 
 }  // namespace command
