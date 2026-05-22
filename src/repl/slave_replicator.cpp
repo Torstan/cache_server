@@ -1,14 +1,11 @@
 #include "repl/slave_replicator.h"
 
 #include <charconv>
-#include <cmath>
 #include <limits>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
 
-#include "cache/redis_object.h"
 #include "common/time.h"
 
 namespace repl {
@@ -24,13 +21,6 @@ bool ParseInt64(const std::string& text, std::int64_t* out) {
   const char* end = text.data() + text.size();
   const auto result = std::from_chars(begin, end, *out);
   return result.ec == std::errc() && result.ptr == end;
-}
-
-bool ParseDouble(const std::string& text, double* out) {
-  const char* begin = text.data();
-  const char* end = text.data() + text.size();
-  const auto result = std::from_chars(begin, end, *out);
-  return result.ec == std::errc() && result.ptr == end && std::isfinite(*out);
 }
 
 bool RelativeExpireSeconds(const cache::BinlogRecord& record,
@@ -51,14 +41,6 @@ bool RelativeExpireSeconds(const cache::BinlogRecord& record,
     return ParseInt64(record.args[2], seconds);
   }
   return false;
-}
-
-cache::RedisObject PreserveDeadline(cache::RedisObject object,
-                                    std::uint64_t deadline_us) {
-  if (deadline_us == 0) {
-    return object;
-  }
-  return object.WithDeadline(deadline_us);
 }
 
 }  // namespace
@@ -180,128 +162,7 @@ bool SlaveReplicator::ApplyRecordViaDispatcher(
 
 bool SlaveReplicator::ApplyRecord(const cache::BinlogRecord& record,
                                   std::uint64_t now_us) {
-  if (engine_ == nullptr) {
-    return false;
-  }
-
-  switch (record.op) {
-    case cache::BinlogOp::kSet:
-      if (record.args.size() == 3) {
-        cache::BinlogRecord replay_record = record;
-        engine_->Set(record.args[1],
-                     cache::RedisObject::MakeString(record.args[2]),
-                     std::move(replay_record), now_us);
-        return true;
-      }
-      break;
-    case cache::BinlogOp::kDel:
-      if (record.args.size() == 2) {
-        engine_->Del(record.args[1], now_us);
-        return true;
-      }
-      break;
-    case cache::BinlogOp::kExpire:
-      if (record.args.size() == 2 || record.args.size() == 3) {
-        std::int64_t seconds = 0;
-        if (!RelativeExpireSeconds(record, &seconds)) {
-          return false;
-        }
-        engine_->Expire(record.args[1], seconds, now_us);
-        return true;
-      }
-      break;
-    case cache::BinlogOp::kHSet:
-      if (record.args.size() == 4) {
-        cache::BinlogRecord replay_record = record;
-        engine_->Update(
-            record.args[1],
-            [&](std::optional<cache::RedisObject> existing)
-                -> std::optional<cache::RedisObject> {
-              cache::HashValue hash;
-              std::uint64_t deadline_us = 0;
-              if (existing) {
-                const cache::HashValue* existing_hash = existing->Hash();
-                if (existing->Type() != cache::RedisObjectType::kHash ||
-                    existing_hash == nullptr) {
-                  return std::nullopt;
-                }
-                hash = *existing_hash;
-                deadline_us = existing->DeadlineUs();
-              }
-              cache::HashValue next =
-                  hash.Set(cache::PackedString(record.args[2]),
-                           cache::PackedString(record.args[3]));
-              return PreserveDeadline(
-                  cache::RedisObject::MakeHash(std::move(next)), deadline_us);
-            },
-            std::move(replay_record), now_us);
-        return true;
-      }
-      break;
-    case cache::BinlogOp::kSAdd:
-      if (record.args.size() == 3) {
-        cache::BinlogRecord replay_record = record;
-        engine_->Update(
-            record.args[1],
-            [&](std::optional<cache::RedisObject> existing)
-                -> std::optional<cache::RedisObject> {
-              cache::SetValue set;
-              std::uint64_t deadline_us = 0;
-              const cache::PackedString member(record.args[2]);
-              if (existing) {
-                const cache::SetValue* existing_set = existing->Set();
-                if (existing->Type() != cache::RedisObjectType::kSet ||
-                    existing_set == nullptr) {
-                  return std::nullopt;
-                }
-                set = *existing_set;
-                deadline_us = existing->DeadlineUs();
-                if (set.Contains(member)) {
-                  return std::nullopt;
-                }
-              }
-              cache::SetValue next = set.Add(member);
-              return PreserveDeadline(
-                  cache::RedisObject::MakeSet(std::move(next)), deadline_us);
-            },
-            std::move(replay_record), now_us);
-        return true;
-      }
-      break;
-    case cache::BinlogOp::kZAdd:
-      if (record.args.size() == 4) {
-        double score = 0.0;
-        if (ParseDouble(record.args[2], &score)) {
-          cache::BinlogRecord replay_record = record;
-          engine_->Update(
-              record.args[1],
-              [&](std::optional<cache::RedisObject> existing)
-                  -> std::optional<cache::RedisObject> {
-                cache::ZSetValue zset;
-                std::uint64_t deadline_us = 0;
-                if (existing) {
-                  const cache::ZSetValue* existing_zset = existing->ZSet();
-                  if (existing->Type() != cache::RedisObjectType::kZSet ||
-                      existing_zset == nullptr) {
-                    return std::nullopt;
-                  }
-                  zset = *existing_zset;
-                  deadline_us = existing->DeadlineUs();
-                }
-                cache::ZSetValue next =
-                    zset.Set(cache::PackedString(record.args[3]), score);
-                return PreserveDeadline(
-                    cache::RedisObject::MakeZSet(std::move(next)),
-                    deadline_us);
-              },
-              std::move(replay_record), now_us);
-          return true;
-        }
-      }
-      break;
-  }
-
-  return false;
+  return ApplyRecordViaDispatcher(record, now_us);
 }
 
 std::size_t SlaveReplicator::WorkerForSlot(std::size_t slot_id) const {

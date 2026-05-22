@@ -181,6 +181,61 @@ CACHE_TEST(SlaveApplyViaCommandDispatcherRejectsUnknownCommand) {
                 "unknown command does not mutate data");
 }
 
+CACHE_TEST(SlaveApplyAllCommandTypesViaDispatcher) {
+  cache::CacheEngine engine;
+  repl::SlaveReplicator slave(&engine, 1);
+  const std::uint64_t now_us = 1000000;
+  std::map<std::size_t, std::uint64_t> next_seq;
+
+  auto apply = [&](cache::BinlogOp op, std::vector<std::string> args,
+                   std::uint64_t ttl_us = 0) {
+    const std::size_t slot = common::SlotForKey(args[1]);
+    cache::BinlogRecord rec;
+    rec.seq = ++next_seq[slot];
+    rec.op = op;
+    rec.args = std::move(args);
+    rec.remaining_ttl_us = ttl_us;
+    slave.ApplyLogForTest(slot, rec, now_us);
+  };
+
+  // SET
+  apply(cache::BinlogOp::kSet, {"SET", "str_key", "str_val"});
+  auto str_obj = engine.Get("str_key", now_us);
+  test::Require(str_obj.has_value(), "SET creates key");
+  test::Require(str_obj->Type() == cache::RedisObjectType::kString,
+                "SET creates string");
+
+  // HSET
+  apply(cache::BinlogOp::kHSet, {"HSET", "hash_key", "field1", "val1"});
+  auto hash_obj = engine.Get("hash_key", now_us);
+  test::Require(hash_obj.has_value(), "HSET creates key");
+  test::Require(hash_obj->Type() == cache::RedisObjectType::kHash,
+                "HSET creates hash");
+
+  // SADD
+  apply(cache::BinlogOp::kSAdd, {"SADD", "set_key", "member1"});
+  auto set_obj = engine.Get("set_key", now_us);
+  test::Require(set_obj.has_value(), "SADD creates key");
+  test::Require(set_obj->Type() == cache::RedisObjectType::kSet,
+                "SADD creates set");
+
+  // ZADD
+  apply(cache::BinlogOp::kZAdd, {"ZADD", "zset_key", "1.5", "member1"});
+  auto zset_obj = engine.Get("zset_key", now_us);
+  test::Require(zset_obj.has_value(), "ZADD creates key");
+  test::Require(zset_obj->Type() == cache::RedisObjectType::kZSet,
+                "ZADD creates zset");
+
+  // DEL
+  apply(cache::BinlogOp::kDel, {"DEL", "str_key"});
+  test::Require(!engine.Get("str_key", now_us).has_value(), "DEL removes key");
+
+  // EXPIRE
+  apply(cache::BinlogOp::kExpire, {"EXPIRE", "hash_key", "300"}, 300000000);
+  auto ttl = engine.Ttl("hash_key", now_us);
+  test::Require(ttl > 0, "EXPIRE sets TTL");
+}
+
 CACHE_TEST(SlaveApplySaturatedExpireDoesNotDeleteKey) {
   cache::CacheEngine engine;
   repl::SlaveReplicator slave(&engine, 4);
