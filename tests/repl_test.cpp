@@ -220,6 +220,21 @@ CACHE_TEST(SlaveApplyRejectsMismatchedCommandName) {
                 "mismatched command does not delete key");
 }
 
+CACHE_TEST(SlaveApplyRejectsReadCommandReplay) {
+  cache::CacheEngine engine;
+  repl::SlaveReplicator slave(&engine, 4);
+
+  WriteString(engine, "k", "v", 1000);
+  cache::BinlogRecord read = MakeRecord(1, cache::BinlogOp::kSet, {"GET", "k"});
+
+  const std::size_t slot = common::SlotForKey("k");
+  slave.ApplyLogForTest(slot, read, 1000);
+
+  test::Require(slave.AppliedSeqForTest(slot) == 0,
+                "read command does not advance seq");
+  RequireString(engine, "k", 1000, "v");
+}
+
 CACHE_TEST(SlaveApplyDecodedDelFrame) {
   cache::CacheEngine engine;
   repl::SlaveReplicator slave(&engine, 1);
@@ -239,6 +254,28 @@ CACHE_TEST(SlaveApplyDecodedDelFrame) {
 
   test::Require(!engine.Get("k", now_us).has_value(),
                 "decoded DEL frame applies");
+}
+
+CACHE_TEST(SlaveApplyRejectsDecodedReadFrame) {
+  cache::CacheEngine engine;
+  repl::SlaveReplicator slave(&engine, 1);
+  const std::uint64_t now_us = 1000;
+
+  WriteString(engine, "k", "v", now_us);
+
+  cache::BinlogRecord record;
+  record.seq = 1;
+  record.args = {"GET", "k"};
+  repl::Frame frame = repl::Frame::Log(common::SlotForKey("k"),
+                                       std::move(record));
+  auto decoded = repl::DecodeFrame(repl::EncodeFrame(frame));
+  test::Require(decoded.has_value(), "frame decodes");
+
+  slave.EnqueueFrame(std::move(*decoded));
+
+  test::Require(slave.AppliedSeqForTest(common::SlotForKey("k")) == 0,
+                "decoded read frame does not advance seq");
+  RequireString(engine, "k", now_us, "v");
 }
 
 CACHE_TEST(SlaveApplyViaCommandDispatcher) {

@@ -8,6 +8,7 @@
 #include <string_view>
 #include <utility>
 
+#include "common/hash.h"
 #include "common/time.h"
 
 namespace repl {
@@ -172,7 +173,7 @@ void SlaveReplicator::ApplyLogOnWorker(std::size_t worker_id,
 
 bool SlaveReplicator::ApplyRecordViaDispatcher(
     const cache::BinlogRecord& record, std::uint64_t now_us) {
-  if (engine_ == nullptr || record.args.empty()) {
+  if (engine_ == nullptr || record.args.size() < 2) {
     return false;
   }
   // Non-SET op values are authoritative for manually constructed records until
@@ -195,6 +196,10 @@ bool SlaveReplicator::ApplyRecordViaDispatcher(
     }
   }
 
+  const std::size_t write_slot = common::SlotForKey(owned_args[1]);
+  const std::uint64_t before_seq =
+      engine_->SlotById(write_slot).Snapshot().published_seq;
+
   std::vector<std::string_view> args;
   args.reserve(owned_args.size());
   for (const std::string& arg : owned_args) {
@@ -202,10 +207,10 @@ bool SlaveReplicator::ApplyRecordViaDispatcher(
   }
 
   protocol::Response response = dispatcher_.Execute(args, *engine_, now_us);
-
-  // Binlog records are expected to replay write commands; dispatcher command
-  // errors are the only response shape that means the mutation was not applied.
-  return response.type != protocol::ResponseType::kError;
+  if (response.type == protocol::ResponseType::kError) {
+    return false;
+  }
+  return engine_->SlotById(write_slot).Snapshot().published_seq > before_seq;
 }
 
 bool SlaveReplicator::ApplyRecord(const cache::BinlogRecord& record,
