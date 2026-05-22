@@ -66,6 +66,53 @@ CACHE_TEST(ReplFrameRoundTripsLog) {
   test::Require(decoded->record.seq == 7, "seq round trips");
 }
 
+CACHE_TEST(ReplFrameEncodesCommandNameDirectly) {
+  cache::BinlogRecord record;
+  record.seq = 42;
+  record.op = cache::BinlogOp::kSet;
+  record.args = {"SET", "mykey", "myvalue"};
+  record.remaining_ttl_us = 0;
+
+  repl::Frame frame = repl::Frame::Log(5, std::move(record));
+  std::string encoded = repl::EncodeFrame(frame);
+
+  auto decoded = repl::DecodeFrame(encoded);
+  test::Require(decoded.has_value(), "frame decodes");
+  test::Require(decoded->subcmd == repl::Subcmd::kLog, "is LOG frame");
+  test::Require(decoded->slot_id == 5, "slot_id preserved");
+  test::Require(decoded->record.seq == 42, "seq preserved");
+  test::Require(decoded->record.args.size() == 3, "args count");
+  test::RequireEqual(decoded->record.args[0], std::string("SET"),
+                     "command name");
+  test::RequireEqual(decoded->record.args[1], std::string("mykey"), "key");
+  test::RequireEqual(decoded->record.args[2], std::string("myvalue"),
+                     "value");
+}
+
+CACHE_TEST(ReplFrameDecodesUnknownCommandNameDirectly) {
+  std::string wire;
+  redis::PackArrayHeader(9, &wire);
+  redis::PackBulkString("CACHE.REPL", &wire);
+  redis::PackBulkString("LOG", &wire);
+  redis::PackBulkString("5", &wire);
+  redis::PackBulkString("42", &wire);
+  redis::PackBulkString("CUSTOM.WRITE", &wire);
+  redis::PackBulkString("0", &wire);
+  redis::PackBulkString("2", &wire);
+  redis::PackBulkString("CUSTOM.WRITE", &wire);
+  redis::PackBulkString("mykey", &wire);
+
+  auto decoded = repl::DecodeFrame(wire);
+  test::Require(decoded.has_value(), "unknown command frame decodes");
+  test::Require(decoded->subcmd == repl::Subcmd::kLog, "is LOG frame");
+  test::Require(decoded->slot_id == 5, "slot_id preserved");
+  test::Require(decoded->record.seq == 42, "seq preserved");
+  test::Require(decoded->record.args.size() == 2, "args count");
+  test::RequireEqual(decoded->record.args[0], std::string("CUSTOM.WRITE"),
+                     "command name");
+  test::RequireEqual(decoded->record.args[1], std::string("mykey"), "key");
+}
+
 CACHE_TEST(MasterReplicatorUsesAckToCleanLogs) {
   cache::CacheEngine engine;
   WriteString(engine, "k", "v1", 100);

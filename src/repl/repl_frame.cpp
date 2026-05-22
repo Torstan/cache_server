@@ -12,46 +12,6 @@ namespace {
 
 constexpr std::size_t kMaxFrameElements = 1024;
 
-std::string ToString(cache::BinlogOp op) {
-  switch (op) {
-    case cache::BinlogOp::kSet:
-      return "SET";
-    case cache::BinlogOp::kDel:
-      return "DEL";
-    case cache::BinlogOp::kExpire:
-      return "EXPIRE";
-    case cache::BinlogOp::kHSet:
-      return "HSET";
-    case cache::BinlogOp::kSAdd:
-      return "SADD";
-    case cache::BinlogOp::kZAdd:
-      return "ZADD";
-  }
-  return "SET";
-}
-
-std::optional<cache::BinlogOp> ParseOp(std::string_view text) {
-  if (text == "SET") {
-    return cache::BinlogOp::kSet;
-  }
-  if (text == "DEL") {
-    return cache::BinlogOp::kDel;
-  }
-  if (text == "EXPIRE") {
-    return cache::BinlogOp::kExpire;
-  }
-  if (text == "HSET") {
-    return cache::BinlogOp::kHSet;
-  }
-  if (text == "SADD") {
-    return cache::BinlogOp::kSAdd;
-  }
-  if (text == "ZADD") {
-    return cache::BinlogOp::kZAdd;
-  }
-  return std::nullopt;
-}
-
 void PackBulk(std::string_view text, std::string* out) {
   redis::PackBulkString(text, out);
 }
@@ -101,11 +61,10 @@ std::optional<Frame> DecodeLog(const redis::RespValue& value) {
 
   auto slot_id = ParseSize(value.elements[2].text);
   auto seq = ParseU64(value.elements[3].text);
-  auto op = ParseOp(value.elements[4].text);
   auto ttl = ParseU64(value.elements[5].text);
   auto arg_count = ParseSize(value.elements[6].text);
-  if (!slot_id.has_value() || !seq.has_value() || !op.has_value() ||
-      !ttl.has_value() || !arg_count.has_value()) {
+  if (!slot_id.has_value() || !seq.has_value() || !ttl.has_value() ||
+      !arg_count.has_value()) {
     return std::nullopt;
   }
   if (*arg_count > value.element_count - 7) {
@@ -117,7 +76,7 @@ std::optional<Frame> DecodeLog(const redis::RespValue& value) {
 
   cache::BinlogRecord record;
   record.seq = *seq;
-  record.op = *op;
+  record.op = cache::BinlogOp::kSet;
   record.remaining_ttl_us = *ttl;
   record.args.reserve(*arg_count);
   for (std::size_t i = 0; i < *arg_count; ++i) {
@@ -184,7 +143,7 @@ std::string EncodeFrame(const Frame& frame) {
       PackBulk("LOG", &out);
       PackSize(frame.slot_id, &out);
       PackNumber(frame.record.seq, &out);
-      PackBulk(ToString(frame.record.op), &out);
+      PackBulk(frame.record.args.empty() ? "SET" : frame.record.args[0], &out);
       PackNumber(frame.record.remaining_ttl_us, &out);
       PackSize(frame.record.args.size(), &out);
       for (const std::string& arg : frame.record.args) {
