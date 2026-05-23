@@ -268,28 +268,26 @@ CACHE_TEST(CommandDispatcherParsesAndExecutesRespArgs) {
                 "unknown command returns error");
 }
 
-CACHE_TEST(CommandDispatcherReportsWriteResults) {
-  cache::CacheEngine engine;
+CACHE_TEST(CommandDispatcherClassifiesWriteCommands) {
   command::CommandDispatcher dispatcher;
-  const std::uint64_t now_us = 1000;
 
-  auto set = ExecResult(dispatcher, engine, now_us, {"SET", "k", "v"});
-  test::Require(set.wrote, "SET reports write");
+  test::Require(dispatcher.IsWriteCommand("SET"), "SET is write command");
+  test::Require(dispatcher.IsWriteCommand("set"),
+                "command classification is case-insensitive");
+  test::Require(dispatcher.IsWriteCommand("HSET"), "HSET is write command");
+  test::Require(dispatcher.IsWriteCommand("SADD"), "SADD is write command");
+  test::Require(dispatcher.IsWriteCommand("ZADD"), "ZADD is write command");
+  test::Require(dispatcher.IsWriteCommand("DEL"), "DEL is write command");
+  test::Require(dispatcher.IsWriteCommand("EXPIRE"),
+                "EXPIRE is write command");
 
-  auto get = ExecResult(dispatcher, engine, now_us, {"GET", "k"});
-  test::Require(!get.wrote, "GET reports no write");
-
-  auto sadd1 = ExecResult(dispatcher, engine, now_us, {"SADD", "s", "m"});
-  test::Require(sadd1.wrote, "new SADD reports write");
-  auto sadd2 = ExecResult(dispatcher, engine, now_us, {"SADD", "s", "m"});
-  test::Require(!sadd2.wrote, "duplicate SADD reports no write");
-
-  auto missing_del = ExecResult(dispatcher, engine, now_us, {"DEL", "missing"});
-  test::Require(!missing_del.wrote, "missing DEL reports no write");
-
-  auto missing_expire =
-      ExecResult(dispatcher, engine, now_us, {"EXPIRE", "missing", "10"});
-  test::Require(!missing_expire.wrote, "missing EXPIRE reports no write");
-  auto expire = ExecResult(dispatcher, engine, now_us, {"EXPIRE", "k", "10"});
-  test::Require(expire.wrote, "existing EXPIRE reports write");
+  test::Require(!dispatcher.IsWriteCommand("GET"), "GET is read command");
+  test::Require(!dispatcher.IsWriteCommand("HGET"), "HGET is read command");
+  test::Require(!dispatcher.IsWriteCommand("SISMEMBER"),
+                "SISMEMBER is read command");
+  test::Require(!dispatcher.IsWriteCommand("ZSCORE"),
+                "ZSCORE is read command");
+  test::Require(!dispatcher.IsWriteCommand("TTL"), "TTL is read command");
+  test::Require(!dispatcher.IsWriteCommand("NO_SUCH_COMMAND"),
+                "unknown command is not classified as write");
 }

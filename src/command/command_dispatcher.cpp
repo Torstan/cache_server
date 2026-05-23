@@ -22,17 +22,23 @@ CommandDispatcher::CommandDispatcher() {
   static ExpireCmd expire_cmd;
   static TtlCmd ttl_cmd;
 
-  commands_["SET"] = {&set_cmd};
-  commands_["GET"] = {&get_cmd};
-  commands_["HSET"] = {&hset_cmd};
-  commands_["HGET"] = {&hget_cmd};
-  commands_["SADD"] = {&sadd_cmd};
-  commands_["SISMEMBER"] = {&sismember_cmd};
-  commands_["ZADD"] = {&zadd_cmd};
-  commands_["ZSCORE"] = {&zscore_cmd};
-  commands_["DEL"] = {&del_cmd};
-  commands_["EXPIRE"] = {&expire_cmd};
-  commands_["TTL"] = {&ttl_cmd};
+  commands_["SET"] = {&set_cmd, true};
+  commands_["GET"] = {&get_cmd, false};
+  commands_["HSET"] = {&hset_cmd, true};
+  commands_["HGET"] = {&hget_cmd, false};
+  commands_["SADD"] = {&sadd_cmd, true};
+  commands_["SISMEMBER"] = {&sismember_cmd, false};
+  commands_["ZADD"] = {&zadd_cmd, true};
+  commands_["ZSCORE"] = {&zscore_cmd, false};
+  commands_["DEL"] = {&del_cmd, true};
+  commands_["EXPIRE"] = {&expire_cmd, true};
+  commands_["TTL"] = {&ttl_cmd, false};
+}
+
+bool CommandDispatcher::IsWriteCommand(std::string_view command) const {
+  std::string cmd_name = common::ToUpperAscii(command);
+  auto it = commands_.find(cmd_name);
+  return it != commands_.end() && it->second.write_cmd;
 }
 
 protocol::Response CommandDispatcher::Execute(

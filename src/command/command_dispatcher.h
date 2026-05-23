@@ -35,10 +35,12 @@ class CommandDispatcher {
       const std::vector<std::string_view>& args, cache::CacheEngine& engine,
       std::uint64_t now_us,
       const CommandReplayOptions& replay_options) const;
+  bool IsWriteCommand(std::string_view command) const;
 
  private:
   struct CommandEntry {
     RedisCmd* cmd;
+    bool write_cmd = false;
   };
 
   std::unordered_map<std::string, CommandEntry> commands_;
