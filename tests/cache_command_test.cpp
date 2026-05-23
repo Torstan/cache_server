@@ -170,7 +170,6 @@ CACHE_TEST(CommandDispatcherReplaysExpireUsingRemainingTtlMetadata) {
   RequireType(replay.response, protocol::ResponseType::kInteger,
               "replayed EXPIRE returns an integer");
   test::Require(replay.response.integer == 1, "replayed EXPIRE succeeds");
-  test::Require(replay.wrote, "replayed EXPIRE reports write");
   test::Require(Exec(dispatcher, engine, now_us + 2'000'000, {"GET", "ttl"})
                     .type == protocol::ResponseType::kBulkString,
                 "saturated replay TTL preserves key");

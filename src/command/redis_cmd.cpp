@@ -11,7 +11,7 @@ std::optional<std::string> RedisCmd::CheckArity(
 CommandResult RedisCmd::ExecWithResult(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
-  return CommandResult{ExecCmd(args, engine, now_us), false};
+  return CommandResult{ExecCmd(args, engine, now_us)};
 }
 
 CommandResult RedisCmd::ExecWithResult(

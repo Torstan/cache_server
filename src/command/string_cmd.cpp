@@ -34,11 +34,9 @@ CommandResult SetCmd::ExecWithResult(
   cache::BinlogRecord record;
   record.op = cache::BinlogOp::kSet;
   record.args = {"SET", std::string(args[1]), std::string(args[2])};
-  cache::WriteResult result =
-      engine.Set(args[1], cache::RedisObject::MakeString(args[2]),
-                 std::move(record), now_us);
-  return CommandResult{protocol::Response::SimpleString("OK"),
-                       result.changed};
+  engine.Set(args[1], cache::RedisObject::MakeString(args[2]),
+             std::move(record), now_us);
+  return CommandResult{protocol::Response::SimpleString("OK")};
 }
 
 std::optional<std::string> GetCmd::CheckArity(

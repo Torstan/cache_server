@@ -54,7 +54,7 @@ CommandResult ZAddCmd::ExecWithResult(
   double score = 0.0;
   if (!common::ParseFiniteDouble(args[2], &score)) {
     return CommandResult{
-        protocol::Response::Error("ERR value is not a valid float"), false};
+        protocol::Response::Error("ERR value is not a valid float")};
   }
 
   std::string_view key = args[1], member = args[3];
@@ -65,7 +65,7 @@ CommandResult ZAddCmd::ExecWithResult(
   record.args = {"ZADD", std::string(key), FormatScore(score),
                  std::string(member)};
 
-  cache::WriteResult result = engine.Update(
+  engine.Update(
       key,
       [&](std::optional<cache::RedisObject> existing)
           -> std::optional<cache::RedisObject> {
@@ -91,10 +91,9 @@ CommandResult ZAddCmd::ExecWithResult(
       std::move(record), now_us);
 
   if (wrong_type) {
-    return CommandResult{protocol::Response::Error(kWrongTypeError), false};
+    return CommandResult{protocol::Response::Error(kWrongTypeError)};
   }
-  return CommandResult{protocol::Response::Integer(created ? 1 : 0),
-                       result.changed};
+  return CommandResult{protocol::Response::Integer(created ? 1 : 0)};
 }
 
 std::optional<std::string> ZScoreCmd::CheckArity(

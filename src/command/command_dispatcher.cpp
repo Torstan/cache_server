@@ -82,20 +82,19 @@ CommandResult CommandDispatcher::ExecuteWithResult(
     std::uint64_t now_us,
     const CommandReplayOptions& replay_options) const {
   if (args.empty()) {
-    return CommandResult{protocol::Response::Error("ERR empty command"), false};
+    return CommandResult{protocol::Response::Error("ERR empty command")};
   }
 
   std::string cmd_name = common::ToUpperAscii(args[0]);
   auto it = commands_.find(cmd_name);
   if (it == commands_.end()) {
     return CommandResult{
-        protocol::Response::Error("ERR unknown command '" + cmd_name + "'"),
-        false};
+        protocol::Response::Error("ERR unknown command '" + cmd_name + "'")};
   }
 
   auto arity_error = it->second.cmd->CheckArity(args, replay_options);
   if (arity_error) {
-    return CommandResult{protocol::Response::Error(*arity_error), false};
+    return CommandResult{protocol::Response::Error(*arity_error)};
   }
 
   return it->second.cmd->ExecWithResult(args, engine, now_us, replay_options);

@@ -39,7 +39,7 @@ CommandResult HSetCmd::ExecWithResult(
   record.args = {"HSET", std::string(key), std::string(field),
                  std::string(value)};
 
-  cache::WriteResult result = engine.Update(
+  engine.Update(
       key,
       [&](std::optional<cache::RedisObject> existing)
           -> std::optional<cache::RedisObject> {
@@ -66,10 +66,9 @@ CommandResult HSetCmd::ExecWithResult(
       std::move(record), now_us);
 
   if (wrong_type) {
-    return CommandResult{protocol::Response::Error(kWrongTypeError), false};
+    return CommandResult{protocol::Response::Error(kWrongTypeError)};
   }
-  return CommandResult{protocol::Response::Integer(created ? 1 : 0),
-                       result.changed};
+  return CommandResult{protocol::Response::Integer(created ? 1 : 0)};
 }
 
 std::optional<std::string> HGetCmd::CheckArity(

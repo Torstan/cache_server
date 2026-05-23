@@ -17,7 +17,6 @@ struct CommandReplayOptions {
 
 struct CommandResult {
   protocol::Response response;
-  bool wrote = false;
 };
 
 class RedisCmd {

@@ -38,7 +38,7 @@ CommandResult SAddCmd::ExecWithResult(
   record.op = cache::BinlogOp::kSAdd;
   record.args = {"SADD", std::string(key), std::string(member)};
 
-  cache::WriteResult result = engine.Update(
+  engine.Update(
       key,
       [&](std::optional<cache::RedisObject> existing)
           -> std::optional<cache::RedisObject> {
@@ -65,10 +65,9 @@ CommandResult SAddCmd::ExecWithResult(
       std::move(record), now_us);
 
   if (wrong_type) {
-    return CommandResult{protocol::Response::Error(kWrongTypeError), false};
+    return CommandResult{protocol::Response::Error(kWrongTypeError)};
   }
-  return CommandResult{protocol::Response::Integer(added ? 1 : 0),
-                       result.changed};
+  return CommandResult{protocol::Response::Integer(added ? 1 : 0)};
 }
 
 std::optional<std::string> SIsMemberCmd::CheckArity(
