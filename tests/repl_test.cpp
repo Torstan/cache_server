@@ -261,6 +261,32 @@ CACHE_TEST(SlaveApplyRejectsReadCommandReplay) {
   RequireString(engine, "k", 1000, "v");
 }
 
+CACHE_TEST(SlaveApplyAdvancesSeqForSuccessfulNoOpWriteCommand) {
+  cache::CacheEngine engine;
+  repl::SlaveReplicator slave(&engine, 4);
+  const std::uint64_t now_us = 1000;
+
+  cache::BinlogRecord first =
+      MakeRecord(1, cache::BinlogOp::kSAdd, {"SADD", "s", "m"});
+  cache::BinlogRecord duplicate =
+      MakeRecord(2, cache::BinlogOp::kSAdd, {"SADD", "s", "m"});
+
+  const std::size_t slot = common::SlotForKey("s");
+  slave.ApplyLogForTest(slot, first, now_us);
+  slave.ApplyLogForTest(slot, duplicate, now_us);
+
+  test::Require(slave.AppliedSeqForTest(slot) == 2,
+                "successful write command advances seq even when response is 0");
+  auto obj = engine.Get("s", now_us);
+  test::Require(obj.has_value(), "set key exists");
+  test::Require(obj->Type() == cache::RedisObjectType::kSet,
+                "set type is preserved");
+  const cache::SetValue* set = obj->Set();
+  test::Require(set != nullptr, "set pointer exists");
+  test::Require(set->Contains(cache::PackedString("m")),
+                "member remains present");
+}
+
 CACHE_TEST(SlaveApplyDecodedDelFrame) {
   cache::CacheEngine engine;
   repl::SlaveReplicator slave(&engine, 1);

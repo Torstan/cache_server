@@ -121,12 +121,13 @@ bool SlaveReplicator::ApplyRecordViaDispatcher(
 
   command::CommandReplayOptions replay_options;
   replay_options.remaining_ttl_us = record.remaining_ttl_us;
+  const bool write_cmd = dispatcher_.IsWriteCommand(record.args[0]);
   command::CommandResult result =
       dispatcher_.ExecuteWithResult(args, *engine_, now_us, replay_options);
   if (result.response.type == protocol::ResponseType::kError) {
     return false;
   }
-  return result.wrote;
+  return write_cmd;
 }
 
 bool SlaveReplicator::ApplyRecord(const cache::BinlogRecord& record,
