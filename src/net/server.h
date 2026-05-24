@@ -10,9 +10,9 @@
 namespace net {
 
 struct ServerConfig {
-  std::string host = "0.0.0.0";
-  std::uint16_t port = 6379;
-  int worker_count = 4;
+  std::string host = "127.0.0.1";
+  std::uint16_t port = 6399;
+  int worker_count = 2;
   int coroutine_count_per_worker = 1024;
 };
 
