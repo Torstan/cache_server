@@ -66,6 +66,11 @@ class RedisObject {
   std::variant<PackedString, HashValue, SetValue, ZSetValue> value_;
 };
 
+struct MutationResult {
+  bool changed = false;
+  std::optional<RedisObject> object;
+};
+
 using ObjectMap =
     ImtMap<PackedString, RedisObject, std::less<PackedString>, AtomicRefCount>;
 

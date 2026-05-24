@@ -97,6 +97,19 @@ WriteResult HashSlot::Update(
     std::function<std::optional<RedisObject>(std::optional<RedisObject>)>
         updater,
     BinlogRecord record, std::uint64_t now_us) {
+  return Mutate(
+      key,
+      [&](std::optional<RedisObject> existing) {
+        std::optional<RedisObject> next = updater(std::move(existing));
+        return MutationResult{next.has_value(), std::move(next)};
+      },
+      std::move(record), now_us);
+}
+
+WriteResult HashSlot::Mutate(
+    std::string_view key,
+    std::function<MutationResult(std::optional<RedisObject>)> mutator,
+    BinlogRecord record, std::uint64_t now_us) {
   const PackedString packed_key(key);
   std::lock_guard<std::mutex> write_lock(write_mutex_);
 
@@ -111,14 +124,26 @@ WriteResult HashSlot::Update(
     }
   }
 
-  const bool created = !existing.has_value();
-  std::optional<RedisObject> new_obj = updater(std::move(existing));
-  if (!new_obj) {
+  const bool had_existing = existing.has_value();
+  MutationResult mutation = mutator(std::move(existing));
+  if (!mutation.changed) {
     return WriteResult{Status::kOk, false, false, slot_seq_};
   }
 
   const std::uint64_t next_seq = slot_seq_ + 1;
-  ObjectMap next_map = current_map.Set(packed_key, std::move(*new_obj));
+  ObjectMap next_map;
+  if (mutation.object.has_value()) {
+    next_map = current_map.Set(packed_key, std::move(*mutation.object));
+  } else {
+    if (!had_existing) {
+      return WriteResult{Status::kOk, false, false, slot_seq_};
+    }
+    auto erased = current_map.Erase(packed_key);
+    if (!erased.has_value()) {
+      return WriteResult{Status::kOk, false, false, slot_seq_};
+    }
+    next_map = std::move(*erased);
+  }
 
   record.seq = next_seq;
   binlog_buffer_.Append(std::move(record));
@@ -129,7 +154,8 @@ WriteResult HashSlot::Update(
     redis_obj_map_ = std::move(next_map);
     published_seq_ = next_seq;
   }
-  return WriteResult{Status::kOk, true, created, next_seq};
+  return WriteResult{Status::kOk, true,
+                     !had_existing && mutation.object.has_value(), next_seq};
 }
 
 WriteResult HashSlot::Del(std::string_view key, std::uint64_t now_us) {

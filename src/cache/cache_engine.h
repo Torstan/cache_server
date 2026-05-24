@@ -26,6 +26,10 @@ class CacheEngine {
       std::function<std::optional<RedisObject>(std::optional<RedisObject>)>
           updater,
       BinlogRecord record, std::uint64_t now_us);
+  WriteResult Mutate(
+      std::string_view key,
+      std::function<MutationResult(std::optional<RedisObject>)> mutator,
+      BinlogRecord record, std::uint64_t now_us);
 
   WriteResult Del(std::string_view key, std::uint64_t now_us);
   std::size_t DeleteExpiredInSlot(std::size_t slot_id, std::size_t max_keys,

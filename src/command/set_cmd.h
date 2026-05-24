@@ -25,4 +25,64 @@ class SIsMemberCmd : public RedisCmd {
       std::uint64_t now_us) const override;
 };
 
+class SRemCmd : public RedisCmd {
+ public:
+  std::optional<std::string> CheckArity(
+      const std::vector<std::string_view>& args) const override;
+  protocol::Response ExecCmd(
+      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+      std::uint64_t now_us) const override;
+  CommandResult ExecWithResult(
+      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+      std::uint64_t now_us) const override;
+};
+
+class SCardCmd : public RedisCmd {
+ public:
+  std::optional<std::string> CheckArity(
+      const std::vector<std::string_view>& args) const override;
+  protocol::Response ExecCmd(
+      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+      std::uint64_t now_us) const override;
+};
+
+class SMembersCmd : public RedisCmd {
+ public:
+  std::optional<std::string> CheckArity(
+      const std::vector<std::string_view>& args) const override;
+  protocol::Response ExecCmd(
+      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+      std::uint64_t now_us) const override;
+};
+
+class SMIsMemberCmd : public RedisCmd {
+ public:
+  std::optional<std::string> CheckArity(
+      const std::vector<std::string_view>& args) const override;
+  protocol::Response ExecCmd(
+      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+      std::uint64_t now_us) const override;
+};
+
+class SPopCmd : public RedisCmd {
+ public:
+  std::optional<std::string> CheckArity(
+      const std::vector<std::string_view>& args) const override;
+  protocol::Response ExecCmd(
+      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+      std::uint64_t now_us) const override;
+  CommandResult ExecWithResult(
+      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+      std::uint64_t now_us) const override;
+};
+
+class SRandMemberCmd : public RedisCmd {
+ public:
+  std::optional<std::string> CheckArity(
+      const std::vector<std::string_view>& args) const override;
+  protocol::Response ExecCmd(
+      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+      std::uint64_t now_us) const override;
+};
+
 }  // namespace command

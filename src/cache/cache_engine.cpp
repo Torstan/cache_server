@@ -31,6 +31,14 @@ WriteResult CacheEngine::Update(
                                 now_us);
 }
 
+WriteResult CacheEngine::Mutate(
+    std::string_view key,
+    std::function<MutationResult(std::optional<RedisObject>)> mutator,
+    BinlogRecord record, std::uint64_t now_us) {
+  return SlotForKey(key).Mutate(key, std::move(mutator), std::move(record),
+                                now_us);
+}
+
 WriteResult CacheEngine::Del(std::string_view key, std::uint64_t now_us) {
   return SlotForKey(key).Del(key, now_us);
 }

@@ -101,3 +101,60 @@ CACHE_TEST(GenericUpdateCancels) {
       engine.SlotForKey("k").CopyLogsAfter(0, 10).size();
   test::Require(after_logs == before_logs, "cancel does not append binlog");
 }
+
+CACHE_TEST(GenericMutateDeletesExistingKey) {
+  cache::CacheEngine engine;
+  const std::uint64_t now = 10;
+  engine.Set("k", cache::RedisObject::MakeString("v"),
+             MakeRecord(cache::BinlogOp::kSet, {"SET", "k", "v"}), now);
+
+  auto result = engine.Mutate(
+      "k",
+      [](std::optional<cache::RedisObject>) {
+        return cache::MutationResult{true, std::nullopt};
+      },
+      MakeRecord(cache::BinlogOp::kDel, {"CUSTOMDEL", "k"}), now);
+
+  test::Require(result.changed, "Mutate delete changes key");
+  test::Require(!engine.Get("k", now).has_value(), "Mutate deletes key");
+}
+
+CACHE_TEST(GenericMutateNoOpDoesNotAppendLog) {
+  cache::CacheEngine engine;
+  const std::uint64_t now = 10;
+
+  auto result = engine.Mutate(
+      "missing",
+      [](std::optional<cache::RedisObject>) {
+        return cache::MutationResult{false, std::nullopt};
+      },
+      MakeRecord(cache::BinlogOp::kSet, {"NOOP", "missing"}), now);
+
+  test::Require(!result.changed, "Mutate no-op reports unchanged");
+  test::Require(engine.SlotForKey("missing").CopyLogsAfter(0, 10).empty(),
+                "Mutate no-op does not append binlog");
+}
+
+CACHE_TEST(GenericMutateDeleteExpiredKeyIsNoOp) {
+  cache::CacheEngine engine;
+  const std::uint64_t now = 10;
+  engine.Set("k", cache::RedisObject::MakeString("v").WithDeadline(now + 1),
+             MakeRecord(cache::BinlogOp::kSet, {"SET", "k", "v"}), now);
+  const std::size_t before_logs =
+      engine.SlotForKey("k").CopyLogsAfter(0, 10).size();
+
+  auto result = engine.Mutate(
+      "k",
+      [](std::optional<cache::RedisObject> existing) {
+        test::Require(!existing.has_value(),
+                      "expired object is not passed to mutator");
+        return cache::MutationResult{true, std::nullopt};
+      },
+      MakeRecord(cache::BinlogOp::kDel, {"CUSTOMDEL", "k"}), now + 2);
+
+  test::Require(!result.changed, "Mutate delete expired key is unchanged");
+  const std::size_t after_logs =
+      engine.SlotForKey("k").CopyLogsAfter(0, 10).size();
+  test::Require(after_logs == before_logs,
+                "Mutate delete expired key does not append binlog");
+}
