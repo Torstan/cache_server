@@ -48,3 +48,7 @@ endif()
 
 enable_testing()
 add_test(NAME cache_tests COMMAND cache_tests)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/redis/run_unit_tests.sh")
+  add_test(NAME redis_unit_tests
+           COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/tests/redis/run_unit_tests.sh")
+endif()
