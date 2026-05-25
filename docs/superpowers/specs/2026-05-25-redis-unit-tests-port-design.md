@@ -2,11 +2,16 @@
 
 ## Goal
 
-Port Redis 6.2 `tests/unit` coverage for commands supported by this server, without changing existing command behavior except for the newly agreed query commands needed by the test suite. The port should preserve official Redis test block bodies for runnable supported command cases, so failures point to compatibility gaps instead of local rewrites.
+Port Redis 6.2 `tests/unit` coverage for commands supported by this server. The work is split into two phases:
+
+1. First, extend the server with the four agreed Redis 6.2 read-only query commands and add focused C++ coverage.
+2. Then, port the Redis unit tests without changing `src` code.
+
+The port should preserve official Redis test block bodies for runnable supported command cases, so failures point to compatibility gaps instead of local rewrites.
 
 The Redis source baseline is `redis/redis` branch or tag `6.2`, under `tests/unit`. `SCAN` semantics follow the Redis command contract described at `https://redis.io/docs/latest/commands/scan/`, with the project-specific cursor simplification described below.
 
-## Scope
+## Scope And Phases
 
 The initial supported command scope is the command registry in `src/command/command_dispatcher.cpp`, plus these new read-only commands:
 
@@ -18,6 +23,25 @@ The initial supported command scope is the command registry in `src/command/comm
 The existing supported commands remain in scope: strings, hashes, sets, sorted sets, `DEL`, `EXPIRE`, and `TTL` as already registered by `CommandDispatcher`.
 
 The following commands and behavior are not in this pass: `FLUSHDB`, `FLUSHALL`, `CONFIG`, `DEBUG`, `OBJECT`, `DBSIZE`, `KEYS`, `RANDOMKEY`, `TIME`, persistence, replication-stream assertions, transactions, blocking clients, ACL, scripting, modules, cluster, pubsub, and Redis internal encoding checks.
+
+Phase 1 may modify `src` and C++ tests. It adds `EXISTS`, `TYPE`, `PTTL`, and `SCAN`, following the existing command implementation style. Phase 2 may modify only test-porting assets, build/test wiring, and documentation; it must not change `src`.
+
+## Phase 1: Query Commands
+
+Implement the four read-only commands under `src`:
+
+- Extend `src/command/key_cmd.h` and `src/command/key_cmd.cpp` with `EXISTS`, `TYPE`, and `PTTL`, because they are keyspace queries alongside `DEL`, `EXPIRE`, and `TTL`.
+- Add `src/command/scan_cmd.h` and `src/command/scan_cmd.cpp` for `SCAN`.
+- Register the commands in `src/command/command_dispatcher.cpp` as non-write commands.
+- Add any necessary read-only cache APIs in `src/cache`.
+- Add the common glob matcher in `src/common`.
+- Add focused C++ tests for all four commands and the matcher.
+
+Phase 1 is complete only when existing C++ tests and the new focused tests pass.
+
+## Phase 2: Redis Unit Test Port
+
+After Phase 1 is complete, copy and filter Redis 6.2 `tests/unit` into the local test suite. This phase must not change `src`; any incompatibility found during the test port is reported as a failing retained test or handled by deleting an out-of-scope upstream block according to the rules below.
 
 ## Test Import Rules
 
