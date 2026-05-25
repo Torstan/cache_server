@@ -50,6 +50,9 @@ CommandDispatcher::CommandDispatcher() {
   static ZCountCmd zcount_cmd;
   static ZIncrByCmd zincrby_cmd;
   static ZRangeCmd zrange_cmd;
+  static ExistsCmd exists_cmd;
+  static TypeCmd type_cmd;
+  static PTtlCmd pttl_cmd;
   static DelCmd del_cmd;
   static ExpireCmd expire_cmd;
   static TtlCmd ttl_cmd;
@@ -94,6 +97,9 @@ CommandDispatcher::CommandDispatcher() {
   commands_["ZCOUNT"] = {&zcount_cmd, false};
   commands_["ZINCRBY"] = {&zincrby_cmd, true};
   commands_["ZRANGE"] = {&zrange_cmd, false};
+  commands_["EXISTS"] = {&exists_cmd, false};
+  commands_["TYPE"] = {&type_cmd, false};
+  commands_["PTTL"] = {&pttl_cmd, false};
   commands_["DEL"] = {&del_cmd, true};
   commands_["EXPIRE"] = {&expire_cmd, true};
   commands_["TTL"] = {&ttl_cmd, false};
