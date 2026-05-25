@@ -66,6 +66,23 @@ std::optional<RedisObject> HashSlot::Get(std::string_view key,
   return *found;
 }
 
+void HashSlot::ForEachLiveObject(
+    std::uint64_t now_us,
+    const std::function<void(const PackedString&, const RedisObject&)>& visitor)
+    const {
+  ObjectMap snapshot;
+  {
+    std::lock_guard<std::mutex> value_lock(value_mutex_);
+    snapshot = redis_obj_map_;
+  }
+
+  snapshot.ForEach([&](const PackedString& key, const RedisObject& object) {
+    if (!object.IsExpired(now_us)) {
+      visitor(key, object);
+    }
+  });
+}
+
 WriteResult HashSlot::Set(std::string_view key, RedisObject obj,
                           BinlogRecord record, std::uint64_t now_us) {
   (void)now_us;

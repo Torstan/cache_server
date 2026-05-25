@@ -16,6 +16,13 @@ std::optional<RedisObject> CacheEngine::Get(std::string_view key,
   return SlotForKey(key).Get(key, now_us);
 }
 
+void CacheEngine::ForEachLiveObjectInSlot(
+    std::size_t slot_id, std::uint64_t now_us,
+    const std::function<void(const PackedString&, const RedisObject&)>& visitor)
+    const {
+  SlotById(slot_id).ForEachLiveObject(now_us, visitor);
+}
+
 WriteResult CacheEngine::Set(std::string_view key, RedisObject obj,
                              BinlogRecord record,
                              std::uint64_t now_us) {

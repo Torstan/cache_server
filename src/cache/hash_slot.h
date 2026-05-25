@@ -22,6 +22,11 @@ class HashSlot {
  public:
   std::optional<RedisObject> Get(std::string_view key,
                                  std::uint64_t now_us) const;
+  // Visitor references are valid only for the duration of each callback.
+  void ForEachLiveObject(
+      std::uint64_t now_us,
+      const std::function<void(const PackedString&, const RedisObject&)>&
+          visitor) const;
   WriteResult Set(std::string_view key, RedisObject obj, BinlogRecord record,
                   std::uint64_t now_us);
   WriteResult Update(
