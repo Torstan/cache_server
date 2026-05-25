@@ -34,5 +34,5 @@ if [[ ${#TEST_FILES[@]} -eq 0 ]]; then
   exit 2
 fi
 
-exec tclsh "${ROOT}/tests/redis/harness/cache_server_unit_runner.tcl" \
+tclsh "${ROOT}/tests/redis/harness/cache_server_unit_runner.tcl" \
   "${HOST}" "${PORT}" "${TEST_FILES[@]}"

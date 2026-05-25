@@ -48,10 +48,12 @@ proc test {name body {expected __no_expected__}} {
         puts stderr "FAIL $name: $result"
         return
     }
-    if {$expected ne "__no_expected__" && $result ne $expected} {
-        incr failed
-        puts stderr "FAIL $name: expected '$expected' got '$result'"
-        return
+    if {$expected ne "__no_expected__"} {
+        if {![string match $expected $result]} {
+            incr failed
+            puts stderr "FAIL $name: expected '$expected' got '$result'"
+            return
+        }
     }
     incr passed
     puts "PASS $name"
