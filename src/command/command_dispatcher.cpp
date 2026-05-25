@@ -2,6 +2,7 @@
 
 #include "command/hash_cmd.h"
 #include "command/key_cmd.h"
+#include "command/scan_cmd.h"
 #include "command/set_cmd.h"
 #include "command/string_cmd.h"
 #include "command/zset_cmd.h"
@@ -53,6 +54,7 @@ CommandDispatcher::CommandDispatcher() {
   static ExistsCmd exists_cmd;
   static TypeCmd type_cmd;
   static PTtlCmd pttl_cmd;
+  static ScanCmd scan_cmd;
   static DelCmd del_cmd;
   static ExpireCmd expire_cmd;
   static TtlCmd ttl_cmd;
@@ -100,6 +102,7 @@ CommandDispatcher::CommandDispatcher() {
   commands_["EXISTS"] = {&exists_cmd, false};
   commands_["TYPE"] = {&type_cmd, false};
   commands_["PTTL"] = {&pttl_cmd, false};
+  commands_["SCAN"] = {&scan_cmd, false};
   commands_["DEL"] = {&del_cmd, true};
   commands_["EXPIRE"] = {&expire_cmd, true};
   commands_["TTL"] = {&ttl_cmd, false};
