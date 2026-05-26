@@ -1,5 +1,6 @@
 #include "command/string_cmd.h"
 
+#include <chrono>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -18,7 +19,7 @@ constexpr const char* kWrongTypeError =
     "WRONGTYPE Operation against a key holding the wrong kind of value";
 constexpr const char* kSyntaxError = "ERR syntax error";
 constexpr const char* kInvalidExpireError =
-    "ERR invalid expire time in 'set' command";
+    "ERR invalid expire time in set";
 constexpr const char* kIntegerError =
     "ERR value is not an integer or out of range";
 constexpr const char* kOverflowError =
@@ -106,19 +107,29 @@ bool CheckedSubtractInt64(std::int64_t left, std::int64_t right,
   return true;
 }
 
-std::uint64_t SaturatingMultiply(std::uint64_t value,
-                                 std::uint64_t multiplier) {
+bool CheckedMultiply(std::uint64_t value, std::uint64_t multiplier,
+                     std::uint64_t* out) {
   if (value > std::numeric_limits<std::uint64_t>::max() / multiplier) {
-    return std::numeric_limits<std::uint64_t>::max();
+    return false;
   }
-  return value * multiplier;
+  *out = value * multiplier;
+  return true;
 }
 
-std::uint64_t SaturatingAdd(std::uint64_t left, std::uint64_t right) {
+bool CheckedAdd(std::uint64_t left, std::uint64_t right, std::uint64_t* out) {
   if (right > std::numeric_limits<std::uint64_t>::max() - left) {
-    return std::numeric_limits<std::uint64_t>::max();
+    return false;
   }
-  return left + right;
+  *out = left + right;
+  return true;
+}
+
+std::uint64_t UnixTimeMicros() {
+  using clock = std::chrono::system_clock;
+  return static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          clock::now().time_since_epoch())
+          .count());
 }
 
 cache::RedisObject ApplyStringDeadline(cache::RedisObject object,
@@ -141,6 +152,47 @@ std::optional<std::string> ParsePositiveExpiration(std::string_view text,
     return std::string(kInvalidExpireError);
   }
   *value = static_cast<std::uint64_t>(parsed);
+  return std::nullopt;
+}
+
+std::optional<std::string> ComputeDeadline(std::string_view option,
+                                           std::uint64_t amount,
+                                           std::uint64_t now_us,
+                                           std::uint64_t* deadline_us) {
+  std::uint64_t duration_us = 0;
+  if (option == "EX") {
+    if (!CheckedMultiply(amount, kMicrosPerSecond, &duration_us) ||
+        !CheckedAdd(now_us, duration_us, deadline_us)) {
+      return std::string(kInvalidExpireError);
+    }
+    return std::nullopt;
+  }
+  if (option == "PX") {
+    if (!CheckedMultiply(amount, kMicrosPerMillisecond, &duration_us) ||
+        !CheckedAdd(now_us, duration_us, deadline_us)) {
+      return std::string(kInvalidExpireError);
+    }
+    return std::nullopt;
+  }
+  std::uint64_t absolute_us = 0;
+  if (option == "EXAT") {
+    if (!CheckedMultiply(amount, kMicrosPerSecond, &absolute_us)) {
+      return std::string(kInvalidExpireError);
+    }
+  } else {
+    if (!CheckedMultiply(amount, kMicrosPerMillisecond, &absolute_us)) {
+      return std::string(kInvalidExpireError);
+    }
+  }
+
+  const std::uint64_t wall_now_us = UnixTimeMicros();
+  if (absolute_us <= wall_now_us) {
+    *deadline_us = now_us;
+    return std::nullopt;
+  }
+  if (!CheckedAdd(now_us, absolute_us - wall_now_us, deadline_us)) {
+    return std::string(kInvalidExpireError);
+  }
   return std::nullopt;
 }
 
@@ -185,17 +237,9 @@ std::optional<std::string> ParseSetOptions(
         return error;
       }
       has_expiration_option = true;
-      if (option == "EX") {
-        options->deadline_us =
-            SaturatingAdd(now_us, SaturatingMultiply(amount, kMicrosPerSecond));
-      } else if (option == "PX") {
-        options->deadline_us = SaturatingAdd(
-            now_us, SaturatingMultiply(amount, kMicrosPerMillisecond));
-      } else if (option == "EXAT") {
-        options->deadline_us = SaturatingMultiply(amount, kMicrosPerSecond);
-      } else {
-        options->deadline_us =
-            SaturatingMultiply(amount, kMicrosPerMillisecond);
+      if (auto error =
+              ComputeDeadline(option, amount, now_us, &options->deadline_us)) {
+        return error;
       }
       i += 2;
     } else {

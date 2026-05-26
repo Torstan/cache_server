@@ -20,6 +20,7 @@ constexpr const char* kWrongTypeError =
     "WRONGTYPE Operation against a key holding the wrong kind of value";
 constexpr const char* kIntegerError =
     "ERR value is not an integer or out of range";
+constexpr const char* kOutOfRangeError = "ERR value is out of range";
 
 cache::BinlogRecord MakeRecord(
     std::string_view command, const std::vector<std::string_view>& args) {
@@ -401,7 +402,7 @@ protocol::Response SRandMemberCmd::ExecCmd(
     return protocol::Response::Error(kIntegerError);
   }
   if (has_count && parsed_count == std::numeric_limits<std::int64_t>::min()) {
-    return protocol::Response::Error(kIntegerError);
+    return protocol::Response::Error(kOutOfRangeError);
   }
 
   return ReadSet(engine, args[1], now_us, [&](const cache::SetValue* set) {

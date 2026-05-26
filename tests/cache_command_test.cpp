@@ -1,6 +1,7 @@
 #include "test_harness.h"
 
 #include <cstdint>
+#include <chrono>
 #include <initializer_list>
 #include <limits>
 #include <algorithm>
@@ -42,6 +43,13 @@ void RequireSimpleString(const protocol::Response& response,
                          std::string_view message) {
   RequireType(response, protocol::ResponseType::kSimpleString, message);
   test::RequireEqual(response.text, expected, message);
+}
+
+void RequireErrorContaining(const protocol::Response& response,
+                            std::string_view expected,
+                            std::string_view message) {
+  RequireType(response, protocol::ResponseType::kError, message);
+  test::Require(response.text.find(expected) != std::string::npos, message);
 }
 
 void RequireArrayTexts(const protocol::Response& response,
@@ -189,6 +197,12 @@ CACHE_TEST(StringAndKeyCommandsMatchRedisSubset) {
   RequireType(del_response, protocol::ResponseType::kInteger,
               "DEL returns an integer");
   test::Require(del_response.integer == 1, "DEL removes key");
+
+  (void)Exec(dispatcher, engine, now_us + 2'000'000, {"SET", "k1", "v"});
+  (void)Exec(dispatcher, engine, now_us + 2'000'000, {"SET", "k2", "v"});
+  auto multi_del_response = Exec(dispatcher, engine, now_us + 2'000'000,
+                                 {"DEL", "k1", "missing", "k2"});
+  RequireInteger(multi_del_response, 2, "DEL removes multiple keys");
 }
 
 CACHE_TEST(ExpireUsesSaturatedTtlInBinlog) {
@@ -314,6 +328,36 @@ CACHE_TEST(StringCommandsMatchRedis62CoreSemantics) {
   test::Require(Exec(dispatcher, engine, now_us, {"TTL", "s"}).integer > 0,
                 "SET KEEPTTL preserves TTL");
 
+  const auto unix_now_seconds =
+      std::chrono::duration_cast<std::chrono::seconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count();
+  RequireSimpleString(
+      Exec(dispatcher, engine, now_us,
+           {"SET", "abs-sec", "v", "EXAT",
+            std::to_string(unix_now_seconds + 10)}),
+      "OK", "SET accepts EXAT");
+  const auto exat_ttl = Exec(dispatcher, engine, now_us, {"TTL", "abs-sec"});
+  RequireType(exat_ttl, protocol::ResponseType::kInteger,
+              "SET EXAT stores a TTL");
+  test::Require(exat_ttl.integer >= 5 && exat_ttl.integer <= 10,
+                "SET EXAT translates unix time to relative TTL");
+
+  const auto unix_now_milliseconds =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count();
+  RequireSimpleString(
+      Exec(dispatcher, engine, now_us,
+           {"SET", "abs-ms", "v", "PXAT",
+            std::to_string(unix_now_milliseconds + 10000)}),
+      "OK", "SET accepts PXAT");
+  const auto pxat_ttl = Exec(dispatcher, engine, now_us, {"TTL", "abs-ms"});
+  RequireType(pxat_ttl, protocol::ResponseType::kInteger,
+              "SET PXAT stores a TTL");
+  test::Require(pxat_ttl.integer >= 5 && pxat_ttl.integer <= 10,
+                "SET PXAT translates unix time to relative TTL");
+
   RequireInteger(Exec(dispatcher, engine, now_us, {"SETNX", "s", "no"}), 0,
                  "SETNX existing key returns 0");
   RequireInteger(Exec(dispatcher, engine, now_us, {"SETNX", "new", "yes"}), 1,
@@ -352,6 +396,17 @@ CACHE_TEST(StringCommandsMatchRedis62CoreSemantics) {
   RequireType(Exec(dispatcher, engine, now_us, {"INCR", "bad-int"}),
               protocol::ResponseType::kError,
               "INCR rejects non-integer strings");
+  RequireSimpleString(
+      Exec(dispatcher, engine, now_us, {"SET", "bad-leading", " 11"}), "OK",
+      "SET stores leading-space integer string");
+  RequireErrorContaining(
+      Exec(dispatcher, engine, now_us, {"INCR", "bad-leading"}),
+      "not an integer", "INCR rejects leading whitespace");
+  RequireErrorContaining(
+      Exec(dispatcher, engine, now_us,
+           {"SET", "too-far", "v", "EX", "10000000000000000"}),
+      "invalid expire time in set",
+      "SET EX rejects expiration that overflows Redis expire storage");
 }
 
 CACHE_TEST(HashCommandsMatchRedis62CoreSemantics) {
@@ -387,6 +442,12 @@ CACHE_TEST(HashCommandsMatchRedis62CoreSemantics) {
                  10, "HINCRBY updates integer field");
   RequireBulk(Exec(dispatcher, engine, now_us, {"HGET", "h", "a"}), "10",
               "HINCRBY stores updated integer");
+  (void)Exec(dispatcher, engine, now_us,
+             {"HSET", "hincr-space", "space", " 11"});
+  RequireErrorContaining(
+      Exec(dispatcher, engine, now_us,
+           {"HINCRBY", "hincr-space", "space", "1"}),
+      "not an integer", "HINCRBY rejects leading whitespace");
 
   auto keys = Exec(dispatcher, engine, now_us, {"HKEYS", "h"});
   test::Require(ArrayHasBulkText(keys, "a") && ArrayHasBulkText(keys, "e"),
@@ -442,6 +503,11 @@ CACHE_TEST(SetCommandsMatchRedis62CoreSemantics) {
               "SRANDMEMBER with count returns array");
   test::Require(random_many.elements.size() <= 2,
                 "positive SRANDMEMBER count does not exceed cardinality");
+  RequireErrorContaining(
+      Exec(dispatcher, engine, now_us,
+           {"SRANDMEMBER", "s", "-9223372036854775808"}),
+      "value is out of range",
+      "SRANDMEMBER rejects minimum int64 count as out of range");
   auto popped = Exec(dispatcher, engine, now_us, {"SPOP", "s", "2"});
   RequireType(popped, protocol::ResponseType::kArray,
               "SPOP with count returns array");

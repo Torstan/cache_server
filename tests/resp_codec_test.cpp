@@ -41,3 +41,39 @@ CACHE_TEST(RespCodecHonorsConfiguredArrayLimit) {
   test::Require(parsed.has_value(), "large command parses");
   test::Require(parsed->args.size() == 300, "configured array limit is honored");
 }
+
+CACHE_TEST(RespCodecDefaultLimitsAcceptRedisUnitBigPayload) {
+  RespCodec codec;
+  std::string payload(4 * 1000 * 1000, 'x');
+  std::string command = "*3\r\n$3\r\nSET\r\n$3\r\nbig\r\n$";
+  command += std::to_string(payload.size());
+  command += "\r\n";
+  command += payload;
+  command += "\r\n";
+
+  test::Require(codec.AppendBytes(command), "big payload appends");
+  auto parsed = codec.NextCommand();
+  test::Require(parsed.has_value(), "big payload command parses");
+  test::RequireEqual(parsed->args[0], "SET", "big payload command name");
+  test::RequireEqual(parsed->args[1], "big", "big payload key");
+  test::Require(parsed->args[2].size() == payload.size(),
+                "big payload value length is preserved");
+}
+
+CACHE_TEST(RespCodecDefaultLimitsAcceptRedisUnitWideHashCommand) {
+  RespCodec codec;
+  std::string command = "*258\r\n$4\r\nHSET\r\n$7\r\nbighash\r\n";
+  for (int i = 0; i < 128; ++i) {
+    const std::string field = "field:" + std::to_string(i);
+    const std::string value = "value:" + std::to_string(i);
+    command += "$" + std::to_string(field.size()) + "\r\n" + field + "\r\n";
+    command += "$" + std::to_string(value.size()) + "\r\n" + value + "\r\n";
+  }
+
+  test::Require(codec.AppendBytes(command), "wide hash command appends");
+  auto parsed = codec.NextCommand();
+  test::Require(parsed.has_value(), "wide hash command parses");
+  test::RequireEqual(parsed->args[0], "HSET", "wide hash command name");
+  test::Require(parsed->args.size() == 258,
+                "wide hash command preserves every argument");
+}

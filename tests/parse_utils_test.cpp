@@ -21,6 +21,8 @@ CACHE_TEST(ParseInt64Invalid) {
   test::Require(!common::ParseInt64("abc", &v), "alpha");
   test::Require(!common::ParseInt64("12.34", &v), "decimal");
   test::Require(!common::ParseInt64("123abc", &v), "trailing");
+  test::Require(!common::ParseInt64(" 123", &v), "leading whitespace");
+  test::Require(!common::ParseInt64("123 ", &v), "trailing whitespace");
 }
 
 CACHE_TEST(ParseFiniteDoubleValid) {

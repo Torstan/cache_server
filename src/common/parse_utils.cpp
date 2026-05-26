@@ -1,6 +1,7 @@
 #include "common/parse_utils.h"
 
 #include <cerrno>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 
@@ -8,6 +9,7 @@ namespace common {
 
 bool ParseInt64(std::string_view text, std::int64_t* out) {
   if (text.empty()) return false;
+  if (std::isspace(static_cast<unsigned char>(text.front()))) return false;
   std::string str(text);
   char* end = nullptr;
   errno = 0;

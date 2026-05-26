@@ -17,13 +17,14 @@ namespace eval resp {
 
     proc write_command {args} {
         variable sock
-        puts -nonewline $sock "*[llength $args]\r\n"
+        set command "*[llength $args]\r\n"
         foreach arg $args {
             set bytes [encoding convertto utf-8 $arg]
-            puts -nonewline $sock "\$[string length $bytes]\r\n"
-            puts -nonewline $sock $bytes
-            puts -nonewline $sock "\r\n"
+            append command "\$[string length $bytes]\r\n"
+            append command $bytes
+            append command "\r\n"
         }
+        puts -nonewline $sock $command
         flush $sock
     }
 
@@ -40,7 +41,11 @@ namespace eval resp {
         variable sock
         set data ""
         while {[string length $data] < $n} {
-            append data [read $sock [expr {$n - [string length $data]}]]
+            set chunk [read $sock [expr {$n - [string length $data]}]]
+            if {$chunk eq ""} {
+                error "connection closed while reading RESP payload"
+            }
+            append data $chunk
         }
         return $data
     }

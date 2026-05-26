@@ -109,7 +109,7 @@ protocol::Response PTtlCmd::ExecCmd(
 
 std::optional<std::string> DelCmd::CheckArity(
     const std::vector<std::string_view>& args) const {
-  if (args.size() != 2) {
+  if (args.size() < 2) {
     return "ERR wrong number of arguments for 'del' command";
   }
   return std::nullopt;
@@ -124,8 +124,13 @@ protocol::Response DelCmd::ExecCmd(
 CommandResult DelCmd::ExecWithResult(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
-  auto deleted = engine.Del(args[1], now_us).changed;
-  return CommandResult{protocol::Response::Integer(deleted ? 1 : 0)};
+  std::int64_t deleted = 0;
+  for (std::size_t index = 1; index < args.size(); ++index) {
+    if (engine.Del(args[index], now_us).changed) {
+      ++deleted;
+    }
+  }
+  return CommandResult{protocol::Response::Integer(deleted)};
 }
 
 std::optional<std::string> ExpireCmd::CheckArity(

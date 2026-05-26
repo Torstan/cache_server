@@ -16,9 +16,9 @@ struct CommandArgs {
 
 class RespCodec {
  public:
-  explicit RespCodec(std::size_t max_stream_bytes = 4 * 1024 * 1024,
-                     std::size_t max_bulk_bytes = 1024 * 1024,
-                     std::size_t max_array_elements = 128);
+  explicit RespCodec(std::size_t max_stream_bytes = 64 * 1024 * 1024,
+                     std::size_t max_bulk_bytes = 64 * 1024 * 1024,
+                     std::size_t max_array_elements = 1024);
 
   bool AppendBytes(std::string_view bytes);
   std::optional<CommandArgs> NextCommand();

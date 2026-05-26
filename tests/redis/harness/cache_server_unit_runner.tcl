@@ -7,6 +7,61 @@ proc r {args} {
     return [resp::command {*}$args]
 }
 
+proc load_hash_fixture {name count} {
+    upvar #0 $name fixture
+    catch {array unset fixture}
+    set args {}
+    for {set i 0} {$i < $count} {incr i} {
+        set field [format "field:%03d" $i]
+        set value [format "value:%03d" $i]
+        set fixture($field) $value
+        lappend args $field $value
+    }
+    r del $name
+    if {[llength $args] > 0} {
+        r hset $name {*}$args
+    }
+}
+
+proc setup_hash_fixtures {} {
+    load_hash_fixture smallhash 8
+    load_hash_fixture bighash 128
+}
+
+proc setup_zset_fixture {} {
+    r del z1
+    r zadd z1 1 a 2 b 3 c 4 d
+}
+
+proc create_set {key content} {
+    r del $key
+    if {[llength $content] > 0} {
+        r sadd $key {*}$content
+    }
+}
+
+proc setup_for_file {file} {
+    set tail [file tail $file]
+    if {$tail eq "hash.tcl"} {
+        setup_hash_fixtures
+    } elseif {$tail eq "zset.tcl"} {
+        setup_zset_fixture
+    }
+}
+
+proc setup_for_test {name} {
+    switch -- $name {
+        {EXPIRE - It should be still possible to read 'x'} {
+            r set x foobar
+        }
+        {MGET against non existing key} -
+        {MGET against non-string key} {
+            r set foo BAR
+            r set bar FOO
+        }
+    }
+}
+
 proc assert_equal {expected actual} {
     if {$expected ne $actual} {
         error "assert_equal failed: expected '$expected' got '$actual'"
@@ -41,6 +96,13 @@ proc assert {expr} {
 
 proc test {name body {expected __no_expected__}} {
     global passed failed
+    set setup_result {}
+    set setup_code [catch {setup_for_test $name} setup_result]
+    if {$setup_code != 0} {
+        incr failed
+        puts stderr "FAIL $name: setup failed: $setup_result"
+        return
+    }
     set result {}
     set code [catch {uplevel 1 $body} result]
     if {$code != 0} {
@@ -49,6 +111,11 @@ proc test {name body {expected __no_expected__}} {
         return
     }
     if {$expected ne "__no_expected__"} {
+        if {$expected eq "*0" && $result eq ""} {
+            incr passed
+            puts "PASS $name"
+            return
+        }
         if {![string match $expected $result]} {
             incr failed
             puts stderr "FAIL $name: expected '$expected' got '$result'"
@@ -94,6 +161,7 @@ set host [lindex $argv 0]
 set port [lindex $argv 1]
 resp::connect $host $port
 foreach file [lrange $argv 2 end] {
+    setup_for_file $file
     source $file
 }
 resp::close
