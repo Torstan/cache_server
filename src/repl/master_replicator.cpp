@@ -80,7 +80,9 @@ std::string MasterReplicator::OnHello(const Frame& hello) {
     replicas_.push_back(std::move(created));
     replica = &replicas_.back();
   }
-  replica->session_id = NewSessionId(hello.replica_id);
+  if (replica->session_id.empty() || hello.session_id != replica->session_id) {
+    replica->session_id = NewSessionId(hello.replica_id);
+  }
   for (const auto& item : hello.slot_positions) {
     if (item.first >= replica->slots.size()) {
       continue;

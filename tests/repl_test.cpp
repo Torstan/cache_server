@@ -12,6 +12,7 @@
 #include "cache/binlog.h"
 #include "cache/cache_engine.h"
 #include "cache/redis_object.h"
+#include "command/command_dispatcher.h"
 #include "common/hash.h"
 #include "redis/resp.h"
 #include "repl/master_replicator.h"
@@ -784,6 +785,95 @@ CACHE_TEST(ReplicationLinkBuildsHelloFromSlaveState) {
   test::RequireEqual(hello.session_id, "old-session", "previous session");
   test::Require(hello.slot_positions.size() == engine.SlotCount(),
                 "reports every slot");
+}
+
+CACHE_TEST(MasterHelloTreatsInitialEmptyBacklogSlotAsCaughtUp) {
+  cache::CacheEngine engine;
+  repl::MasterReplicator master(&engine);
+  const std::size_t slot = common::SlotForKey("empty-slot-key");
+
+  std::string session =
+      master.OnHello(repl::Frame::Hello("replica-a", 1, "", {{slot, 0}}));
+
+  auto frames =
+      master.BuildFramesForReplica("replica-a", engine.SlotCount(), 1000);
+  test::RequireEqual(session, std::string("replica-a-1"),
+                     "initial hello creates session");
+  for (const repl::Frame& frame : frames) {
+    test::Require(frame.slot_id != slot,
+                  "initially empty slot needs no snapshot or log frame");
+  }
+}
+
+CACHE_TEST(MasterHelloReusesPreviousSessionForReconnect) {
+  cache::CacheEngine engine;
+  WriteString(engine, "k", "v1", 100);
+
+  repl::MasterReplicator master(&engine);
+  const std::size_t slot = common::SlotForKey("k");
+  std::string first_session =
+      master.OnHello(repl::Frame::Hello("replica-a", 1, "", {{slot, 0}}));
+
+  std::string resumed_session = master.OnHello(
+      repl::Frame::Hello("replica-a", 1, first_session, {{slot, 1}}));
+
+  test::RequireEqual(resumed_session, first_session,
+                     "matching previous session resumes");
+}
+
+CACHE_TEST(MasterStartsNewSessionForUnknownPreviousSession) {
+  cache::CacheEngine engine;
+  repl::MasterReplicator master(&engine);
+  const std::size_t slot = common::SlotForKey("k");
+
+  std::string first_session =
+      master.OnHello(repl::Frame::Hello("replica-a", 1, "", {{slot, 0}}));
+  std::string new_session = master.OnHello(
+      repl::Frame::Hello("replica-a", 1, "stale-session", {{slot, 0}}));
+
+  test::Require(new_session != first_session,
+                "stale previous session starts a new session");
+}
+
+CACHE_TEST(ReplicaConvergesAfterInitialEmptyPoll) {
+  cache::CacheEngine master_engine;
+  cache::CacheEngine replica_engine;
+  repl::MasterReplicator master(&master_engine);
+  repl::SlaveReplicator replica(&replica_engine, 2);
+
+  repl::Frame initial_hello =
+      repl::BuildHelloFrame("replica-a", replica.CurrentSessionId(), replica, 1);
+  (void)master.OnHello(initial_hello);
+  auto initial_frames =
+      master.BuildFramesForReplica("replica-a", master_engine.SlotCount(), 1000);
+  test::Require(initial_frames.empty(), "empty initial poll has no frames");
+  test::Require(replica.CurrentSessionId().empty(),
+                "replica has no session until it receives a frame");
+
+  WriteString(master_engine, "k4", "100", 1000);
+  command::CommandDispatcher dispatcher;
+  (void)dispatcher.Execute(std::vector<std::string>{"INCR", "k4"},
+                           master_engine, 1000);
+  (void)dispatcher.Execute(std::vector<std::string>{"INCRBY", "k4", "10"},
+                           master_engine, 1000);
+
+  for (int poll = 0; poll < 3; ++poll) {
+    repl::Frame hello = repl::BuildHelloFrame(
+        "replica-a", replica.CurrentSessionId(), replica, 1);
+    (void)master.OnHello(hello);
+    for (repl::Frame& frame : master.BuildFramesForReplica(
+             "replica-a", master_engine.SlotCount(), 1000)) {
+      if (frame.subcmd == repl::Subcmd::kSnapshot ||
+          frame.subcmd == repl::Subcmd::kLog) {
+        if (replica.CurrentSessionId().empty()) {
+          replica.StartSessionForTest(frame.session_id);
+        }
+        replica.EnqueueFrame(std::move(frame));
+      }
+    }
+  }
+
+  RequireString(replica_engine, "k4", 1000, "111");
 }
 
 CACHE_TEST(MasterTwoReplicasEventuallyReceiveSameLog) {
