@@ -57,7 +57,7 @@ CACHE_TEST(ReplFrameRoundTripsLog) {
   record.op = cache::BinlogOp::kSet;
   record.args = {"SET", "k", "v"};
 
-  repl::Frame frame = repl::Frame::Log(3, record);
+  repl::Frame frame = repl::Frame::Log("test-session", 3, record);
   std::string wire = repl::EncodeFrame(frame);
   auto decoded = repl::DecodeFrame(wire);
 
@@ -84,7 +84,7 @@ CACHE_TEST(ReplFrameEncodesCommandNameDirectly) {
   record.args = {"DEL", "mykey"};
   record.remaining_ttl_us = 0;
 
-  repl::Frame frame = repl::Frame::Log(5, std::move(record));
+  repl::Frame frame = repl::Frame::Log("test-session", 5, std::move(record));
   std::string encoded = repl::EncodeFrame(frame);
 
   auto decoded = repl::DecodeFrame(encoded);
@@ -101,9 +101,10 @@ CACHE_TEST(ReplFrameEncodesCommandNameDirectly) {
 
 CACHE_TEST(ReplFrameDecodesUnknownCommandNameDirectly) {
   std::string wire;
-  redis::PackArrayHeader(9, &wire);
+  redis::PackArrayHeader(10, &wire);
   redis::PackBulkString("CACHE.REPL", &wire);
   redis::PackBulkString("LOG", &wire);
+  redis::PackBulkString("test-session", &wire);
   redis::PackBulkString("5", &wire);
   redis::PackBulkString("42", &wire);
   redis::PackBulkString("CUSTOM.WRITE", &wire);
@@ -125,9 +126,10 @@ CACHE_TEST(ReplFrameDecodesUnknownCommandNameDirectly) {
 
 CACHE_TEST(ReplFrameRejectsMismatchedCommandElement) {
   std::string wire;
-  redis::PackArrayHeader(10, &wire);
+  redis::PackArrayHeader(11, &wire);
   redis::PackBulkString("CACHE.REPL", &wire);
   redis::PackBulkString("LOG", &wire);
+  redis::PackBulkString("test-session", &wire);
   redis::PackBulkString("5", &wire);
   redis::PackBulkString("42", &wire);
   redis::PackBulkString("DEL", &wire);
@@ -146,7 +148,7 @@ CACHE_TEST(ReplFrameRoundTripsEmptyArgsLog) {
   record.seq = 42;
   record.args = {};
 
-  repl::Frame frame = repl::Frame::Log(5, std::move(record));
+  repl::Frame frame = repl::Frame::Log("test-session", 5, std::move(record));
   std::string wire = repl::EncodeFrame(frame);
   auto decoded = repl::DecodeFrame(wire);
 
@@ -164,11 +166,11 @@ CACHE_TEST(ReplFrameRoundTripsEmptyArgsLog) {
   test::Require(parsed.value != nullptr, "encoded frame has value");
   test::Require(parsed.value->type == redis::RespType::kArray,
                 "encoded frame array");
-  test::Require(parsed.value->element_count == 7,
+  test::Require(parsed.value->element_count == 8,
                 "empty args log element count");
-  test::Require(parsed.value->elements[4].type == redis::RespType::kBulkString,
+  test::Require(parsed.value->elements[5].type == redis::RespType::kBulkString,
                 "command metadata is bulk string");
-  test::Require(parsed.value->elements[4].text.empty(),
+  test::Require(parsed.value->elements[5].text.empty(),
                 "empty args log has empty command metadata");
 }
 
@@ -186,9 +188,10 @@ CACHE_TEST(MasterReplicatorUsesAckToCleanLogs) {
 
 CACHE_TEST(ReplFrameRejectsMalformedAckCount) {
   std::string wire;
-  redis::PackArrayHeader(3, &wire);
+  redis::PackArrayHeader(4, &wire);
   redis::PackBulkString("CACHE.REPL", &wire);
   redis::PackBulkString("ACK", &wire);
+  redis::PackBulkString("test-session", &wire);
   redis::PackBulkString("999999999999999999", &wire);
 
   test::Require(!repl::DecodeFrame(wire).has_value(),
@@ -297,7 +300,7 @@ CACHE_TEST(SlaveApplyDecodedDelFrame) {
   cache::BinlogRecord record;
   record.seq = 1;
   record.args = {"DEL", "k"};
-  repl::Frame frame = repl::Frame::Log(common::SlotForKey("k"),
+  repl::Frame frame = repl::Frame::Log("test-session", common::SlotForKey("k"),
                                        std::move(record));
   auto decoded = repl::DecodeFrame(repl::EncodeFrame(frame));
   test::Require(decoded.has_value(), "frame decodes");
@@ -318,7 +321,7 @@ CACHE_TEST(SlaveApplyRejectsDecodedReadFrame) {
   cache::BinlogRecord record;
   record.seq = 1;
   record.args = {"GET", "k"};
-  repl::Frame frame = repl::Frame::Log(common::SlotForKey("k"),
+  repl::Frame frame = repl::Frame::Log("test-session", common::SlotForKey("k"),
                                        std::move(record));
   auto decoded = repl::DecodeFrame(repl::EncodeFrame(frame));
   test::Require(decoded.has_value(), "frame decodes");
@@ -341,7 +344,8 @@ CACHE_TEST(SlaveApplyRejectsFrameSlotKeyMismatch) {
   cache::BinlogRecord record;
   record.seq = 1;
   record.args = {"SET", key, "v"};
-  repl::Frame frame = repl::Frame::Log(frame_slot, std::move(record));
+  repl::Frame frame = repl::Frame::Log("test-session", frame_slot,
+                                       std::move(record));
   auto decoded = repl::DecodeFrame(repl::EncodeFrame(frame));
   test::Require(decoded.has_value(), "frame decodes");
 
@@ -369,7 +373,8 @@ CACHE_TEST(ReplEndToEndCommandAgnostic) {
   test::Require(logs.size() == 1, "one log entry");
 
   repl::Frame frame =
-      repl::Frame::Log(common::SlotForKey("key1"), std::move(logs[0]));
+      repl::Frame::Log("test-session", common::SlotForKey("key1"),
+                       std::move(logs[0]));
   std::string wire = repl::EncodeFrame(frame);
   auto decoded = repl::DecodeFrame(wire);
   test::Require(decoded.has_value(), "frame decodes");
@@ -573,4 +578,57 @@ CACHE_TEST(SlaveApplyReplaysGenericCommandTypes) {
   apply(cache::BinlogOp::kSet, {"SET", "gone", "v"});
   apply(cache::BinlogOp::kDel, {"DEL", "gone"});
   test::Require(!engine.Get("gone", now_us).has_value(), "DEL replays");
+}
+
+CACHE_TEST(ReplFrameRoundTripsHelloWithSlotPositions) {
+  repl::Frame frame = repl::Frame::Hello(
+      "replica-a", 1, "old-session", {{3, 7}, {5, 9}});
+
+  auto decoded = repl::DecodeFrame(repl::EncodeFrame(frame));
+  test::Require(decoded.has_value(), "HELLO decodes");
+  test::Require(decoded->subcmd == repl::Subcmd::kHello, "is HELLO");
+  test::RequireEqual(decoded->replica_id, "replica-a", "replica id");
+  test::Require(decoded->proto_version == 1, "protocol version");
+  test::RequireEqual(decoded->session_id, "old-session", "previous session");
+  test::Require(decoded->slot_positions.size() == 2, "slot count");
+  test::Require(decoded->slot_positions[0].first == 3, "first slot id");
+  test::Require(decoded->slot_positions[0].second == 7, "first seq");
+}
+
+CACHE_TEST(ReplFrameRoundTripsSnapshotWithSession) {
+  repl::Frame frame = repl::Frame::Snapshot("session-1", 11, 42, "payload");
+
+  auto decoded = repl::DecodeFrame(repl::EncodeFrame(frame));
+  test::Require(decoded.has_value(), "SNAPSHOT decodes");
+  test::Require(decoded->subcmd == repl::Subcmd::kSnapshot, "is SNAPSHOT");
+  test::RequireEqual(decoded->session_id, "session-1", "session id");
+  test::Require(decoded->slot_id == 11, "slot id");
+  test::Require(decoded->base_seq == 42, "base seq");
+  test::RequireEqual(decoded->snapshot_payload, "payload", "payload");
+}
+
+CACHE_TEST(ReplFrameRoundTripsLogWithSession) {
+  cache::BinlogRecord record;
+  record.seq = 8;
+  record.args = {"SET", "k", "v"};
+  record.remaining_ttl_us = 0;
+
+  repl::Frame frame = repl::Frame::Log("session-2", 4, std::move(record));
+
+  auto decoded = repl::DecodeFrame(repl::EncodeFrame(frame));
+  test::Require(decoded.has_value(), "LOG decodes");
+  test::RequireEqual(decoded->session_id, "session-2", "session id");
+  test::Require(decoded->slot_id == 4, "slot id");
+  test::Require(decoded->record.seq == 8, "seq");
+  test::RequireEqual(decoded->record.args[0], "SET", "command");
+}
+
+CACHE_TEST(ReplFrameRoundTripsAckWithSession) {
+  repl::Frame frame = repl::Frame::Ack("session-3", {{1, 2}, {2, 5}});
+
+  auto decoded = repl::DecodeFrame(repl::EncodeFrame(frame));
+  test::Require(decoded.has_value(), "ACK decodes");
+  test::Require(decoded->subcmd == repl::Subcmd::kAck, "is ACK");
+  test::RequireEqual(decoded->session_id, "session-3", "session id");
+  test::Require(decoded->acked_slots.size() == 2, "acked slots");
 }
