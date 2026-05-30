@@ -732,3 +732,13 @@ CACHE_TEST(UnsupportedRedis62CommandsRemainUnregistered) {
                   "unsupported command remains unregistered");
   }
 }
+
+CACHE_TEST(CommandDispatcherClassifiesReadAndWriteCommands) {
+  command::CommandDispatcher dispatcher;
+  test::Require(dispatcher.IsWriteCommand("SET"), "SET is write");
+  test::Require(dispatcher.IsWriteCommand("del"), "DEL is write");
+  test::Require(!dispatcher.IsWriteCommand("GET"), "GET is read");
+  test::Require(!dispatcher.IsWriteCommand("ttl"), "TTL is read");
+  test::Require(!dispatcher.IsWriteCommand("NO_SUCH_COMMAND"),
+                "unknown command is not write");
+}

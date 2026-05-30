@@ -1,9 +1,13 @@
 #include <cstdlib>
 #include <cstdint>
+#include <memory>
+#include <string>
+#include <string_view>
 #include <signal.h>
 
 #include "cache/cache_engine.h"
 #include "net/server.h"
+#include "repl/slave_replicator.h"
 
 int main(int argc, char** argv) {
   signal(SIGPIPE, SIG_IGN);
@@ -19,7 +23,31 @@ int main(int argc, char** argv) {
     config.coroutine_count_per_worker = std::atoi(argv[3]);
   }
 
+  for (int i = 4; i < argc; ++i) {
+    std::string_view arg(argv[i]);
+    if (arg == "--replica") {
+      config.role = net::ServerRole::kReplica;
+    } else if (arg == "--replica-reads") {
+      config.replica_reads = true;
+    } else if (arg.rfind("--master=", 0) == 0) {
+      std::string value(arg.substr(9));
+      const std::size_t colon = value.find(':');
+      if (colon != std::string::npos) {
+        config.master_host = value.substr(0, colon);
+        config.master_port =
+            static_cast<std::uint16_t>(std::atoi(value.c_str() + colon + 1));
+      }
+    } else if (arg.rfind("--replica-id=", 0) == 0) {
+      config.replica_id = std::string(arg.substr(13));
+    }
+  }
+
   cache::CacheEngine engine;
-  net::Server server(config, &engine);
+  std::unique_ptr<repl::SlaveReplicator> slave;
+  if (config.role == net::ServerRole::kReplica) {
+    slave = std::make_unique<repl::SlaveReplicator>(&engine,
+                                                    config.worker_count);
+  }
+  net::Server server(config, &engine, slave.get());
   return server.Run();
 }
