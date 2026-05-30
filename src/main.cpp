@@ -3,10 +3,14 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <signal.h>
+#include <unistd.h>
 
 #include "cache/cache_engine.h"
 #include "net/server.h"
+#include "repl/master_replicator.h"
+#include "repl/replication_link.h"
 #include "repl/slave_replicator.h"
 
 int main(int argc, char** argv) {
@@ -48,6 +52,21 @@ int main(int argc, char** argv) {
     slave = std::make_unique<repl::SlaveReplicator>(&engine,
                                                     config.worker_count);
   }
-  net::Server server(config, &engine, slave.get());
+  std::unique_ptr<repl::MasterReplicator> master;
+  if (config.role == net::ServerRole::kMaster) {
+    master = std::make_unique<repl::MasterReplicator>(&engine);
+  }
+
+  if (config.role == net::ServerRole::kReplica && slave != nullptr) {
+    std::thread([&config, slave_ptr = slave.get()]() {
+      for (;;) {
+        repl::PollReplicaOnce(config.master_host, config.master_port,
+                              config.replica_id, slave_ptr);
+        sleep(1);
+      }
+    }).detach();
+  }
+
+  net::Server server(config, &engine, slave.get(), master.get());
   return server.Run();
 }

@@ -16,6 +16,7 @@
 #include "redis/resp.h"
 #include "repl/master_replicator.h"
 #include "repl/repl_frame.h"
+#include "repl/replication_link.h"
 #include "repl/slave_replicator.h"
 #include "repl/snapshot_codec.h"
 
@@ -768,4 +769,19 @@ CACHE_TEST(MasterBudgetPressureMarksLaggingSlotForSnapshot) {
   test::Require(!frames.empty(), "budget pressure emits frame");
   test::Require(frames[0].subcmd == repl::Subcmd::kSnapshot,
                 "lagging slot resyncs by snapshot");
+}
+
+CACHE_TEST(ReplicationLinkBuildsHelloFromSlaveState) {
+  cache::CacheEngine engine;
+  repl::SlaveReplicator slave(&engine, 2);
+  slave.StartSessionForTest("old-session");
+
+  repl::Frame hello =
+      repl::BuildHelloFrame("replica-a", "old-session", slave, 1);
+
+  test::Require(hello.subcmd == repl::Subcmd::kHello, "builds HELLO");
+  test::RequireEqual(hello.replica_id, "replica-a", "replica id");
+  test::RequireEqual(hello.session_id, "old-session", "previous session");
+  test::Require(hello.slot_positions.size() == engine.SlotCount(),
+                "reports every slot");
 }

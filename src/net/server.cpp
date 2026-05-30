@@ -28,6 +28,9 @@
 #include "common/time.h"
 #include "protocol/resp_codec.h"
 #include "protocol/response.h"
+#include "redis/resp.h"
+#include "repl/master_replicator.h"
+#include "repl/repl_frame.h"
 #include "repl/slave_replicator.h"
 #include "thread_worker.h"
 
@@ -48,8 +51,7 @@ using co::co_yield_ct;
 
 constexpr std::size_t kPendingFdLimit = 4096;
 
-[[maybe_unused]] static bool IsCacheReplCommand(
-    const std::vector<std::string>& args) {
+static bool IsCacheReplCommand(const std::vector<std::string>& args) {
   return !args.empty() && common::ToUpperAscii(args[0]) == "CACHE.REPL";
 }
 
@@ -60,6 +62,7 @@ struct Task {
   const command::CommandDispatcher* dispatcher = nullptr;
   const ServerConfig* config = nullptr;
   repl::SlaveReplicator* slave_replicator = nullptr;
+  repl::MasterReplicator* master_replicator = nullptr;
   TimeoutItem io_event;
   epoll_event event;
 };
@@ -68,12 +71,14 @@ class Worker {
  public:
   Worker(int worker_id, const ServerConfig* config, cache::CacheEngine* engine,
          const command::CommandDispatcher* dispatcher,
-         repl::SlaveReplicator* slave_replicator)
+         repl::SlaveReplicator* slave_replicator,
+         repl::MasterReplicator* master_replicator)
       : worker_id_(worker_id),
         config_(config),
         engine_(engine),
         dispatcher_(dispatcher),
-        slave_replicator_(slave_replicator) {}
+        slave_replicator_(slave_replicator),
+        master_replicator_(master_replicator) {}
 
   void DispatchFd(int fd) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -94,6 +99,7 @@ class Worker {
       task->dispatcher = dispatcher_;
       task->config = config_;
       task->slave_replicator = slave_replicator_;
+      task->master_replicator = master_replicator_;
       task->coroutine = co_create([task]() { ConnectionRoutine(task); });
       co_resume(task->coroutine);
     }
@@ -159,6 +165,32 @@ class Worker {
     while (auto command = codec->NextCommand()) {
       if (command->args.empty()) {
         continue;
+      }
+      if (IsCacheReplCommand(command->args) && task->config != nullptr &&
+          task->config->role == ServerRole::kMaster &&
+          task->master_replicator != nullptr) {
+        std::string wire;
+        redis::PackArrayHeader(command->args.size(), &wire);
+        for (const std::string& arg : command->args) {
+          redis::PackBulkString(arg, &wire);
+        }
+        auto frame = repl::DecodeFrame(wire);
+        if (!frame.has_value() || frame->subcmd != repl::Subcmd::kHello) {
+          protocol::PackResponse(
+              protocol::Response::Error("ERR invalid repl frame"), out);
+          continue;
+        }
+        (void)task->master_replicator->OnHello(*frame);
+        std::vector<repl::Frame> frames =
+            task->master_replicator->BuildFramesForReplica(
+                frame->replica_id, 1024, common::NowMicros());
+        for (const repl::Frame& outbound : frames) {
+          out->append(repl::EncodeFrame(outbound));
+        }
+        WriteAll(task->fd, *out);
+        out->clear();
+        CloseTask(task);
+        return false;
       }
       if (task->config != nullptr &&
           task->config->role == ServerRole::kReplica &&
@@ -313,6 +345,7 @@ class Worker {
   cache::CacheEngine* engine_;
   const command::CommandDispatcher* dispatcher_;
   repl::SlaveReplicator* slave_replicator_;
+  repl::MasterReplicator* master_replicator_;
   std::mutex mutex_;
   std::list<int> pending_fds_;
   std::atomic<bool> has_pending_fds_{false};
@@ -398,10 +431,12 @@ void AcceptRoutine() {
 }  // namespace
 
 Server::Server(ServerConfig config, cache::CacheEngine* engine,
-               repl::SlaveReplicator* slave_replicator)
+               repl::SlaveReplicator* slave_replicator,
+               repl::MasterReplicator* master_replicator)
     : config_(std::move(config)),
       engine_(engine),
-      slave_replicator_(slave_replicator) {}
+      slave_replicator_(slave_replicator),
+      master_replicator_(master_replicator) {}
 
 int Server::Run() {
   if (engine_ == nullptr) {
@@ -424,7 +459,8 @@ int Server::Run() {
   g_workers = &workers;
   for (int i = 0; i < config_.worker_count; ++i) {
     workers.push_back(std::make_unique<Worker>(
-        i, &config_, engine_, &dispatcher_, slave_replicator_));
+        i, &config_, engine_, &dispatcher_, slave_replicator_,
+        master_replicator_));
     Worker* worker = workers.back().get();
     const int coroutine_count = config_.coroutine_count_per_worker;
     std::thread([worker, coroutine_count]() {

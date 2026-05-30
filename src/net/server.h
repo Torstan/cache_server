@@ -7,6 +7,7 @@
 
 #include "cache/cache_engine.h"
 #include "command/command_dispatcher.h"
+#include "repl/master_replicator.h"
 #include "repl/slave_replicator.h"
 
 namespace net {
@@ -29,7 +30,8 @@ struct ServerConfig {
 class Server {
  public:
   Server(ServerConfig config, cache::CacheEngine* engine,
-         repl::SlaveReplicator* slave_replicator = nullptr);
+         repl::SlaveReplicator* slave_replicator = nullptr,
+         repl::MasterReplicator* master_replicator = nullptr);
   int Run();
 
  private:
@@ -37,6 +39,7 @@ class Server {
   cache::CacheEngine* engine_;
   command::CommandDispatcher dispatcher_;
   repl::SlaveReplicator* slave_replicator_ = nullptr;
+  repl::MasterReplicator* master_replicator_ = nullptr;
 };
 
 }  // namespace net
