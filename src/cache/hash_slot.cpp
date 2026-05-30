@@ -344,6 +344,31 @@ SlotSnapshot HashSlot::Snapshot() const {
   return SlotSnapshot{redis_obj_map_, published_seq_};
 }
 
+void HashSlot::InstallReplicaSnapshot(ObjectMap map, std::uint64_t seq) {
+  std::lock_guard<std::mutex> write_lock(write_mutex_);
+  binlog_buffer_.Clear();
+  slot_seq_ = seq;
+  {
+    std::lock_guard<std::mutex> value_lock(value_mutex_);
+    redis_obj_map_ = std::move(map);
+    published_seq_ = seq;
+  }
+}
+
+void HashSlot::MarkReplicaAppliedSeq(std::uint64_t seq) {
+  std::lock_guard<std::mutex> write_lock(write_mutex_);
+  if (seq <= slot_seq_) {
+    return;
+  }
+  slot_seq_ = seq;
+  {
+    std::lock_guard<std::mutex> value_lock(value_mutex_);
+    if (seq > published_seq_) {
+      published_seq_ = seq;
+    }
+  }
+}
+
 std::vector<BinlogRecord> HashSlot::CopyLogsAfter(std::uint64_t seq,
                                                   std::size_t limit) const {
   std::lock_guard<std::mutex> write_lock(write_mutex_);

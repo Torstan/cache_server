@@ -28,6 +28,7 @@ struct BinlogRecord {
 class BinlogBuffer {
  public:
   void Append(BinlogRecord record);
+  void Clear();
   std::vector<BinlogRecord> CopyAfter(std::uint64_t seq,
                                       std::size_t limit) const;
   void AckThrough(std::uint64_t seq);

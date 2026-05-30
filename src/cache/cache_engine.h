@@ -41,6 +41,9 @@ class CacheEngine {
   bool Expire(std::string_view key, std::int64_t seconds,
               std::uint64_t now_us);
   std::int64_t Ttl(std::string_view key, std::uint64_t now_us) const;
+  void InstallSlotReplicaSnapshot(std::size_t slot_id, ObjectMap map,
+                                  std::uint64_t seq);
+  void MarkSlotReplicaAppliedSeq(std::size_t slot_id, std::uint64_t seq);
 
   HashSlot& SlotForKey(std::string_view key);
   const HashSlot& SlotForKey(std::string_view key) const;

@@ -8,6 +8,8 @@ void BinlogBuffer::Append(BinlogRecord record) {
   records_.push_back(std::move(record));
 }
 
+void BinlogBuffer::Clear() { records_.clear(); }
+
 std::vector<BinlogRecord> BinlogBuffer::CopyAfter(std::uint64_t seq,
                                                   std::size_t limit) const {
   std::vector<BinlogRecord> result;

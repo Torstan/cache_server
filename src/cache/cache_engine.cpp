@@ -66,6 +66,17 @@ std::int64_t CacheEngine::Ttl(std::string_view key,
   return SlotForKey(key).Ttl(key, now_us);
 }
 
+void CacheEngine::InstallSlotReplicaSnapshot(std::size_t slot_id,
+                                             ObjectMap map,
+                                             std::uint64_t seq) {
+  SlotById(slot_id).InstallReplicaSnapshot(std::move(map), seq);
+}
+
+void CacheEngine::MarkSlotReplicaAppliedSeq(std::size_t slot_id,
+                                            std::uint64_t seq) {
+  SlotById(slot_id).MarkReplicaAppliedSeq(seq);
+}
+
 HashSlot& CacheEngine::SlotForKey(std::string_view key) {
   return SlotById(common::SlotForKey(key));
 }

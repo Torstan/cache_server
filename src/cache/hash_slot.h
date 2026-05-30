@@ -45,6 +45,8 @@ class HashSlot {
               std::uint64_t now_us);
   std::int64_t Ttl(std::string_view key, std::uint64_t now_us) const;
   SlotSnapshot Snapshot() const;
+  void InstallReplicaSnapshot(ObjectMap map, std::uint64_t seq);
+  void MarkReplicaAppliedSeq(std::uint64_t seq);
   std::vector<BinlogRecord> CopyLogsAfter(std::uint64_t seq,
                                           std::size_t limit) const;
   void AckLogsThrough(std::uint64_t seq);
