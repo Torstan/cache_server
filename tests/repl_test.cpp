@@ -785,3 +785,32 @@ CACHE_TEST(ReplicationLinkBuildsHelloFromSlaveState) {
   test::Require(hello.slot_positions.size() == engine.SlotCount(),
                 "reports every slot");
 }
+
+CACHE_TEST(MasterTwoReplicasEventuallyReceiveSameLog) {
+  cache::CacheEngine master_engine;
+  cache::CacheEngine replica_a_engine;
+  cache::CacheEngine replica_b_engine;
+  repl::MasterReplicator master(&master_engine);
+  repl::SlaveReplicator replica_a(&replica_a_engine, 2);
+  repl::SlaveReplicator replica_b(&replica_b_engine, 2);
+
+  const std::size_t slot = common::SlotForKey("k");
+  std::string session_a =
+      master.OnHello(repl::Frame::Hello("a", 1, "", {{slot, 0}}));
+  std::string session_b =
+      master.OnHello(repl::Frame::Hello("b", 1, "", {{slot, 0}}));
+  replica_a.StartSessionForTest(session_a);
+  replica_b.StartSessionForTest(session_b);
+
+  WriteString(master_engine, "k", "v", 1000);
+
+  for (repl::Frame& frame : master.BuildFramesForReplica("a", 16, 1000)) {
+    replica_a.EnqueueFrame(std::move(frame));
+  }
+  for (repl::Frame& frame : master.BuildFramesForReplica("b", 16, 1000)) {
+    replica_b.EnqueueFrame(std::move(frame));
+  }
+
+  RequireString(replica_a_engine, "k", 1000, "v");
+  RequireString(replica_b_engine, "k", 1000, "v");
+}
