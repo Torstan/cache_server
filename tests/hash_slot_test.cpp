@@ -94,3 +94,50 @@ CACHE_TEST(CacheEngineInstallsReplicaSnapshotBySlot) {
   test::Require(engine.SlotById(slot_id).Snapshot().published_seq == 9,
                 "engine publishes snapshot seq");
 }
+
+CACHE_TEST(BinlogBufferTracksBytesAndTrimBoundaries) {
+  cache::BinlogBuffer buffer;
+
+  cache::BinlogRecord first;
+  first.seq = 1;
+  first.args = {"SET", "k", "v"};
+  const std::size_t first_bytes = cache::EstimateBinlogRecordBytes(first);
+  buffer.Append(first);
+
+  cache::BinlogRecord second;
+  second.seq = 2;
+  second.args = {"APPEND", "k", "tail"};
+  const std::size_t second_bytes = cache::EstimateBinlogRecordBytes(second);
+  buffer.Append(second);
+
+  test::Require(buffer.RetainedBytes() == first_bytes + second_bytes,
+                "binlog retained bytes include both records");
+  test::Require(buffer.MinSeq() == 1, "min seq tracks first record");
+  test::Require(buffer.MaxSeq() == 2, "max seq tracks last record");
+
+  const std::size_t removed = buffer.AckThroughAndCountBytes(1);
+  test::Require(removed == first_bytes, "trim returns removed bytes");
+  test::Require(buffer.RetainedBytes() == second_bytes,
+                "trim subtracts retained bytes");
+
+  buffer.Clear();
+  test::Require(buffer.RetainedBytes() == 0, "clear resets retained bytes");
+  test::Require(buffer.MinSeq() == 0, "clear resets min seq");
+  test::Require(buffer.MaxSeq() == 0, "clear resets max seq");
+}
+
+CACHE_TEST(HashSlotExposesRetainedLogStats) {
+  cache::HashSlot slot;
+  cache::BinlogRecord record;
+  record.args = {"SET", "k", "v"};
+
+  slot.Set("k", cache::RedisObject::MakeString("v"), std::move(record), 1000);
+
+  test::Require(slot.RetainedLogBytes() > 0, "slot reports retained bytes");
+  test::Require(slot.MinRetainedLogSeq() == 1, "slot reports min retained seq");
+  test::Require(slot.MaxRetainedLogSeq() == 1, "slot reports max retained seq");
+
+  const std::size_t removed = slot.AckLogsThroughAndCountBytes(1);
+  test::Require(removed > 0, "slot trim reports removed bytes");
+  test::Require(slot.RetainedLogBytes() == 0, "slot retained bytes reset");
+}

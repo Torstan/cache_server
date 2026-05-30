@@ -49,6 +49,10 @@ class HashSlot {
   void MarkReplicaAppliedSeq(std::uint64_t seq);
   std::vector<BinlogRecord> CopyLogsAfter(std::uint64_t seq,
                                           std::size_t limit) const;
+  std::uint64_t MinRetainedLogSeq() const;
+  std::uint64_t MaxRetainedLogSeq() const;
+  std::size_t RetainedLogBytes() const;
+  std::size_t AckLogsThroughAndCountBytes(std::uint64_t seq);
   void AckLogsThrough(std::uint64_t seq);
 
  private:

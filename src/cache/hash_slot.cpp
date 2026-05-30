@@ -375,6 +375,26 @@ std::vector<BinlogRecord> HashSlot::CopyLogsAfter(std::uint64_t seq,
   return binlog_buffer_.CopyAfter(seq, limit);
 }
 
+std::uint64_t HashSlot::MinRetainedLogSeq() const {
+  std::lock_guard<std::mutex> write_lock(write_mutex_);
+  return binlog_buffer_.MinSeq();
+}
+
+std::uint64_t HashSlot::MaxRetainedLogSeq() const {
+  std::lock_guard<std::mutex> write_lock(write_mutex_);
+  return binlog_buffer_.MaxSeq();
+}
+
+std::size_t HashSlot::RetainedLogBytes() const {
+  std::lock_guard<std::mutex> write_lock(write_mutex_);
+  return binlog_buffer_.RetainedBytes();
+}
+
+std::size_t HashSlot::AckLogsThroughAndCountBytes(std::uint64_t seq) {
+  std::lock_guard<std::mutex> write_lock(write_mutex_);
+  return binlog_buffer_.AckThroughAndCountBytes(seq);
+}
+
 void HashSlot::AckLogsThrough(std::uint64_t seq) {
   std::lock_guard<std::mutex> write_lock(write_mutex_);
   binlog_buffer_.AckThrough(seq);
