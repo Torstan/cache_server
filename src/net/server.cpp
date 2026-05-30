@@ -50,6 +50,7 @@ using co::co_resume;
 using co::co_yield_ct;
 
 constexpr std::size_t kPendingFdLimit = 4096;
+constexpr std::size_t kReplicationMaxArrayElements = 1'000'000;
 
 static bool IsCacheReplCommand(const std::vector<std::string>& args) {
   return !args.empty() && common::ToUpperAscii(args[0]) == "CACHE.REPL";
@@ -181,9 +182,12 @@ class Worker {
           continue;
         }
         (void)task->master_replicator->OnHello(*frame);
+        const std::size_t max_frames = task->engine == nullptr
+                                           ? 0
+                                           : task->engine->SlotCount();
         std::vector<repl::Frame> frames =
             task->master_replicator->BuildFramesForReplica(
-                frame->replica_id, 1024, common::NowMicros());
+                frame->replica_id, max_frames, common::NowMicros());
         for (const repl::Frame& outbound : frames) {
           out->append(repl::EncodeFrame(outbound));
         }
@@ -240,7 +244,12 @@ class Worker {
         continue;
       }
 
-      protocol::RespCodec codec;
+      const bool repl_listener =
+          task->config != nullptr && task->config->role == ServerRole::kMaster &&
+          task->master_replicator != nullptr;
+      protocol::RespCodec codec(
+          64 * 1024 * 1024, 64 * 1024 * 1024,
+          repl_listener ? kReplicationMaxArrayElements : 1024);
       for (;;) {
         const ssize_t ret = read(task->fd, buffer, sizeof(buffer));
         if (ret > 0) {

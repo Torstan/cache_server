@@ -143,15 +143,14 @@ std::vector<Frame> MasterReplicator::BuildFramesForReplica(
       slot.need_snapshot = false;
       continue;
     }
-    const std::uint64_t after = slot.sent_seq;
     std::vector<cache::BinlogRecord> logs =
-        engine_->SlotById(slot_id).CopyLogsAfter(after, 1);
-    if (logs.empty()) {
-      continue;
+        engine_->SlotById(slot_id).CopyLogsAfter(slot.sent_seq,
+                                                 max_frames - frames.size());
+    for (cache::BinlogRecord& log : logs) {
+      slot.sent_seq = log.seq;
+      frames.push_back(Frame::Log(replica->session_id, slot_id,
+                                  std::move(log)));
     }
-    slot.sent_seq = logs[0].seq;
-    frames.push_back(Frame::Log(replica->session_id, slot_id,
-                                std::move(logs[0])));
   }
   return frames;
 }

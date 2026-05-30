@@ -41,6 +41,30 @@ void WriteString(cache::CacheEngine& engine, std::string_view key,
              now_us);
 }
 
+
+std::string FindKeyForSlotAtLeast(std::size_t min_slot) {
+  for (std::size_t i = 0;; ++i) {
+    std::string key = "slot-key-" + std::to_string(i);
+    if (common::SlotForKey(key) >= min_slot) {
+      return key;
+    }
+  }
+}
+
+std::vector<std::string> FindKeysForSlotsBelow(std::size_t max_slot) {
+  std::vector<std::string> keys(max_slot);
+  std::size_t found = 0;
+  for (std::size_t i = 0; found < max_slot; ++i) {
+    std::string key = "low-slot-key-" + std::to_string(i);
+    const std::size_t slot = common::SlotForKey(key);
+    if (slot < max_slot && keys[slot].empty()) {
+      keys[slot] = std::move(key);
+      ++found;
+    }
+  }
+  return keys;
+}
+
 void RequireString(cache::CacheEngine& engine, std::string_view key,
                    std::uint64_t now_us, std::string_view expected) {
   auto obj = engine.Get(key, now_us);
@@ -712,6 +736,69 @@ CACHE_TEST(MasterHelloStreamsLogsWhenBacklogAvailable) {
                 "available backlog streams LOG");
   test::RequireEqual(frames[0].session_id, session, "session id attached");
   test::Require(frames[0].record.seq == 2, "streams next log");
+}
+
+CACHE_TEST(MasterStreamsMultipleLogsForSlotWithinBudget) {
+  cache::CacheEngine engine;
+  WriteString(engine, "k", "v1", 100);
+  WriteString(engine, "k", "v2", 200);
+  WriteString(engine, "k", "v3", 300);
+
+  repl::MasterReplicator master(&engine);
+  const std::size_t slot = common::SlotForKey("k");
+  repl::Frame hello = repl::Frame::Hello("replica-a", 1, "", {{slot, 0}});
+  (void)master.OnHello(hello);
+
+  auto frames = master.BuildFramesForReplica("replica-a", 16, 1000);
+  test::Require(frames.size() == 3,
+                "streams consecutive logs for one slot in one poll");
+  for (const auto& frame : frames) {
+    test::Require(frame.subcmd == repl::Subcmd::kLog, "streams LOG frames");
+    test::Require(frame.slot_id == slot, "streams one slot");
+  }
+  test::Require(frames[0].record.seq == 1, "streams first log");
+  test::Require(frames[1].record.seq == 2, "streams second log");
+  test::Require(frames[2].record.seq == 3, "streams third log");
+}
+
+CACHE_TEST(MasterSlotCountBudgetReachesHighSlotLog) {
+  cache::CacheEngine engine;
+  const std::size_t small_budget = 1024;
+  std::vector<std::string> low_slot_keys = FindKeysForSlotsBelow(small_budget);
+  std::vector<std::pair<std::size_t, std::uint64_t>> positions;
+  positions.reserve(small_budget + 1);
+  for (const std::string& key : low_slot_keys) {
+    WriteString(engine, key, "v1", 100);
+    positions.push_back({common::SlotForKey(key), 0});
+  }
+  const std::string high_slot_key = FindKeyForSlotAtLeast(small_budget);
+  const std::size_t high_slot = common::SlotForKey(high_slot_key);
+  WriteString(engine, high_slot_key, "v1", 100);
+  positions.push_back({high_slot, 0});
+
+  repl::MasterReplicator master(&engine);
+  repl::Frame hello = repl::Frame::Hello("replica-a", 1, "", positions);
+  (void)master.OnHello(hello);
+
+  auto small_budget_frames =
+      master.BuildFramesForReplica("replica-a", small_budget, 1000);
+  test::Require(small_budget_frames.size() == small_budget,
+                "small budget is consumed before high slot");
+  for (const auto& frame : small_budget_frames) {
+    test::Require(frame.slot_id != high_slot,
+                  "fixed 1024 frame budget cannot reach this high slot");
+  }
+
+  auto slot_budget_frames =
+      master.BuildFramesForReplica("replica-a", engine.SlotCount(), 1000);
+  test::Require(slot_budget_frames.size() == 1,
+                "slot-count frame budget reaches high slot log");
+  test::Require(slot_budget_frames[0].subcmd == repl::Subcmd::kLog,
+                "high slot emits LOG");
+  test::Require(slot_budget_frames[0].slot_id == high_slot,
+                "emits the high slot log");
+  test::Require(slot_budget_frames[0].record.seq == 1,
+                "emits the pending high slot seq");
 }
 
 CACHE_TEST(MasterHelloSnapshotsWhenBacklogMissing) {

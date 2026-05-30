@@ -70,7 +70,7 @@ Response Response::Array(std::vector<Response> values) {
 
 RespCodec::RespCodec(std::size_t max_stream_bytes, std::size_t max_bulk_bytes,
                      std::size_t max_array_elements)
-    : scratch_(max_array_elements + 1), max_stream_bytes_(max_stream_bytes) {
+    : scratch_(max_array_elements + 2), max_stream_bytes_(max_stream_bytes) {
   limits_.max_bulk_bytes = max_bulk_bytes;
   limits_.max_array_elements = max_array_elements;
 }

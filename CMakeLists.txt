@@ -52,3 +52,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/redis/run_unit_tests.sh")
   add_test(NAME redis_unit_tests
            COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/tests/redis/run_unit_tests.sh")
 endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/replication_integration_test.sh")
+  add_test(NAME replication_integration
+           COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/tests/replication_integration_test.sh")
+endif()

@@ -77,3 +77,17 @@ CACHE_TEST(RespCodecDefaultLimitsAcceptRedisUnitWideHashCommand) {
   test::Require(parsed->args.size() == 258,
                 "wide hash command preserves every argument");
 }
+
+CACHE_TEST(RespCodecParsesCommandAtArrayLimit) {
+  RespCodec codec(1024 * 1024, 1024, 1024);
+  std::string command = "*1024\r\n";
+  for (int i = 0; i < 1024; ++i) {
+    command += "$1\r\na\r\n";
+  }
+
+  test::Require(codec.AppendBytes(command), "limit-sized command appends");
+  auto parsed = codec.NextCommand();
+  test::Require(parsed.has_value(), "limit-sized command parses");
+  test::Require(parsed->args.size() == 1024,
+                "array at configured limit preserves every argument");
+}
