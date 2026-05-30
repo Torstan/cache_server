@@ -17,6 +17,7 @@ target_include_directories(cache_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/cpp_util/redis/include
   ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/cpp_util/immutable_container/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/cpp_util/conn_util/include
   ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/libco
 )
 
