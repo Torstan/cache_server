@@ -1,13 +1,13 @@
 #include "repl/replication_link.h"
 
-#include <arpa/inet.h>
-#include <sys/socket.h>
 #include <unistd.h>
 
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "conn_util/endpoint.h"
+#include "conn_util/socket_utils.h"
 #include "protocol/resp_codec.h"
 #include "redis/resp.h"
 #include "repl/repl_frame.h"
@@ -32,14 +32,18 @@ bool PollReplicaOnce(const std::string& master_host, std::uint16_t master_port,
   if (slave == nullptr || master_port == 0) {
     return false;
   }
-  const int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  conn_util::Endpoint endpoint(master_host, master_port);
+  const int fd = conn_util::CreateTcpClientSocket();
   if (fd < 0) {
     return false;
   }
-  sockaddr_in addr = {};
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(master_port);
-  addr.sin_addr.s_addr = inet_addr(master_host.c_str());
+
+  sockaddr_in addr;
+  if (!endpoint.toSockAddr(&addr)) {
+    close(fd);
+    return false;
+  }
+
   if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
     close(fd);
     return false;
