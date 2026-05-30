@@ -6,6 +6,7 @@
 
 #include "common/hash.h"
 #include "common/time.h"
+#include "repl/snapshot_codec.h"
 
 namespace repl {
 
@@ -27,7 +28,13 @@ SlaveReplicator::SlaveReplicator(cache::CacheEngine* engine,
 }
 
 void SlaveReplicator::EnqueueFrame(Frame frame) {
-  if (frame.subcmd != Subcmd::kLog) {
+  if (frame.subcmd == Subcmd::kSnapshot) {
+    if (IsCurrentSession(frame)) {
+      ApplySnapshot(frame);
+    }
+    return;
+  }
+  if (frame.subcmd != Subcmd::kLog || !IsCurrentSession(frame)) {
     return;
   }
   ApplyLogOnWorker(WorkerForSlot(frame.slot_id), frame.slot_id, frame.record,
@@ -58,6 +65,36 @@ std::size_t SlaveReplicator::WorkerForSlotForTest(std::size_t slot_id) const {
   return WorkerForSlot(slot_id);
 }
 
+void SlaveReplicator::StartSessionForTest(std::string session_id) {
+  session_id_ = std::move(session_id);
+}
+
+SlaveReplicator::SlotState SlaveReplicator::SlotStateForTest(
+    std::size_t slot_id) const {
+  const SlotApplyState* state = FindStateForSlot(slot_id);
+  return state == nullptr ? SlotState::kOffline : state->state;
+}
+
+bool SlaveReplicator::CanReadSlotForTest(std::size_t slot_id) const {
+  return CanReadSlot(slot_id);
+}
+
+bool SlaveReplicator::CanReadSlot(std::size_t slot_id) const {
+  return SlotStateForTest(slot_id) == SlotState::kOnline;
+}
+
+std::size_t SlaveReplicator::SlotCount() const {
+  return slot_states_.size();
+}
+
+const std::string& SlaveReplicator::CurrentSessionId() const {
+  return session_id_;
+}
+
+bool SlaveReplicator::IsCurrentSession(const Frame& frame) const {
+  return !session_id_.empty() && frame.session_id == session_id_;
+}
+
 void SlaveReplicator::ApplyLog(std::size_t slot_id,
                                const cache::BinlogRecord& record,
                                std::uint64_t now_us) {
@@ -79,6 +116,12 @@ void SlaveReplicator::ApplyLogOnWorker(std::size_t worker_id,
   }
   if (record.seq != state.applied_seq + 1) {
     state.pending.emplace(record.seq, record);
+    if (state.pending.size() > max_pending_logs_per_slot_) {
+      state.pending.clear();
+      state.state = SlotState::kOffline;
+    } else if (state.state == SlotState::kOnline) {
+      state.state = SlotState::kCatchingUp;
+    }
     return;
   }
 
@@ -86,6 +129,10 @@ void SlaveReplicator::ApplyLogOnWorker(std::size_t worker_id,
     return;
   }
   state.applied_seq = record.seq;
+  if (engine_ != nullptr) {
+    engine_->MarkSlotReplicaAppliedSeq(slot_id, state.applied_seq);
+  }
+  state.state = SlotState::kOnline;
 
   for (;;) {
     auto next = state.pending.find(state.applied_seq + 1);
@@ -95,9 +142,14 @@ void SlaveReplicator::ApplyLogOnWorker(std::size_t worker_id,
     cache::BinlogRecord pending = std::move(next->second);
     state.pending.erase(next);
     if (!ApplyRecord(pending, now_us, slot_id)) {
+      state.state = SlotState::kOffline;
       return;
     }
     state.applied_seq = pending.seq;
+    if (engine_ != nullptr) {
+      engine_->MarkSlotReplicaAppliedSeq(slot_id, state.applied_seq);
+    }
+    state.state = SlotState::kOnline;
   }
 }
 
@@ -127,6 +179,9 @@ bool SlaveReplicator::ApplyRecordViaDispatcher(
   if (result.response.type == protocol::ResponseType::kError) {
     return false;
   }
+  if (write_cmd) {
+    engine_->SlotById(slot_id).AckLogsThrough(record.seq);
+  }
   return write_cmd;
 }
 
@@ -134,6 +189,41 @@ bool SlaveReplicator::ApplyRecord(const cache::BinlogRecord& record,
                                   std::uint64_t now_us,
                                   std::size_t slot_id) {
   return ApplyRecordViaDispatcher(record, now_us, slot_id);
+}
+
+void SlaveReplicator::ApplySnapshot(const Frame& frame) {
+  if (engine_ == nullptr || frame.slot_id >= slot_states_.size()) {
+    return;
+  }
+  SlotApplyState& state = StateForSlot(frame.slot_id);
+  state.state = SlotState::kSnapshotting;
+
+  auto decoded = DecodeSnapshotPayload(frame.snapshot_payload);
+  if (!decoded.has_value()) {
+    state.state = SlotState::kOffline;
+    return;
+  }
+
+  engine_->InstallSlotReplicaSnapshot(frame.slot_id, std::move(*decoded),
+                                      frame.base_seq);
+  state.applied_seq = frame.base_seq;
+  state.pending.clear();
+  state.state = SlotState::kOnline;
+
+  for (;;) {
+    auto next = state.pending.find(state.applied_seq + 1);
+    if (next == state.pending.end()) {
+      return;
+    }
+    cache::BinlogRecord pending = std::move(next->second);
+    state.pending.erase(next);
+    if (!ApplyRecord(pending, ApplyNowUs(), frame.slot_id)) {
+      state.state = SlotState::kOffline;
+      return;
+    }
+    state.applied_seq = pending.seq;
+    engine_->MarkSlotReplicaAppliedSeq(frame.slot_id, state.applied_seq);
+  }
 }
 
 std::size_t SlaveReplicator::WorkerForSlot(std::size_t slot_id) const {

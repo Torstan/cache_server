@@ -17,6 +17,7 @@
 #include "repl/master_replicator.h"
 #include "repl/repl_frame.h"
 #include "repl/slave_replicator.h"
+#include "repl/snapshot_codec.h"
 
 namespace {
 
@@ -293,6 +294,7 @@ CACHE_TEST(SlaveApplyAdvancesSeqForSuccessfulNoOpWriteCommand) {
 CACHE_TEST(SlaveApplyDecodedDelFrame) {
   cache::CacheEngine engine;
   repl::SlaveReplicator slave(&engine, 1);
+  slave.StartSessionForTest("test-session");
   const std::uint64_t now_us = 1000;
 
   WriteString(engine, "k", "v", now_us);
@@ -314,6 +316,7 @@ CACHE_TEST(SlaveApplyDecodedDelFrame) {
 CACHE_TEST(SlaveApplyRejectsDecodedReadFrame) {
   cache::CacheEngine engine;
   repl::SlaveReplicator slave(&engine, 1);
+  slave.StartSessionForTest("test-session");
   const std::uint64_t now_us = 1000;
 
   WriteString(engine, "k", "v", now_us);
@@ -336,6 +339,7 @@ CACHE_TEST(SlaveApplyRejectsDecodedReadFrame) {
 CACHE_TEST(SlaveApplyRejectsFrameSlotKeyMismatch) {
   cache::CacheEngine engine;
   repl::SlaveReplicator slave(&engine, 1);
+  slave.StartSessionForTest("test-session");
   const std::uint64_t now_us = 1000;
   const std::string key = "slot_mismatch_key";
   const std::size_t key_slot = common::SlotForKey(key);
@@ -361,6 +365,7 @@ CACHE_TEST(ReplEndToEndCommandAgnostic) {
   cache::CacheEngine master_engine;
   cache::CacheEngine slave_engine;
   repl::SlaveReplicator replicator(&slave_engine, 1);
+  replicator.StartSessionForTest("test-session");
   const std::uint64_t now_us = 1000000;
 
   cache::BinlogRecord set_rec;
@@ -631,4 +636,60 @@ CACHE_TEST(ReplFrameRoundTripsAckWithSession) {
   test::Require(decoded->subcmd == repl::Subcmd::kAck, "is ACK");
   test::RequireEqual(decoded->session_id, "session-3", "session id");
   test::Require(decoded->acked_slots.size() == 2, "acked slots");
+}
+
+CACHE_TEST(SlaveAppliesSnapshotAtomicallyForCurrentSession) {
+  cache::CacheEngine engine;
+  repl::SlaveReplicator slave(&engine, 4);
+  slave.StartSessionForTest("session-1");
+
+  WriteString(engine, "old", "value", 1000);
+
+  cache::ObjectMap map;
+  map = map.Set(cache::PackedString("fresh"),
+                cache::RedisObject::MakeString("snapshot"));
+  std::string payload = repl::EncodeSnapshotPayload(map, 1000);
+  repl::Frame snapshot = repl::Frame::Snapshot(
+      "session-1", common::SlotForKey("fresh"), 12, payload);
+
+  slave.EnqueueFrame(std::move(snapshot));
+
+  RequireString(engine, "fresh", 1000, "snapshot");
+  test::Require(slave.AppliedSeqForTest(common::SlotForKey("fresh")) == 12,
+                "snapshot applies base seq");
+  test::Require(slave.SlotStateForTest(common::SlotForKey("fresh")) ==
+                    repl::SlaveReplicator::SlotState::kOnline,
+                "snapshot slot becomes online");
+}
+
+CACHE_TEST(SlaveRejectsOldSessionFrames) {
+  cache::CacheEngine engine;
+  repl::SlaveReplicator slave(&engine, 4);
+  slave.StartSessionForTest("current");
+
+  cache::BinlogRecord record;
+  record.seq = 1;
+  record.args = {"SET", "k", "v"};
+  slave.EnqueueFrame(repl::Frame::Log("old", common::SlotForKey("k"),
+                                      std::move(record)));
+
+  test::Require(!engine.Get("k", 1000).has_value(),
+                "old session log ignored");
+  test::Require(slave.AppliedSeqForTest(common::SlotForKey("k")) == 0,
+                "old session does not advance seq");
+}
+
+CACHE_TEST(SlaveKeepsSlotOfflineAfterBadSnapshotPayload) {
+  cache::CacheEngine engine;
+  repl::SlaveReplicator slave(&engine, 4);
+  const std::size_t slot = common::SlotForKey("k");
+  slave.StartSessionForTest("session-1");
+
+  slave.EnqueueFrame(repl::Frame::Snapshot("session-1", slot, 3, "bad"));
+
+  test::Require(slave.SlotStateForTest(slot) ==
+                    repl::SlaveReplicator::SlotState::kOffline,
+                "bad snapshot leaves slot offline");
+  test::Require(slave.AppliedSeqForTest(slot) == 0,
+                "bad snapshot does not ack");
 }
