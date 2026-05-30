@@ -693,3 +693,79 @@ CACHE_TEST(SlaveKeepsSlotOfflineAfterBadSnapshotPayload) {
   test::Require(slave.AppliedSeqForTest(slot) == 0,
                 "bad snapshot does not ack");
 }
+
+CACHE_TEST(MasterHelloStreamsLogsWhenBacklogAvailable) {
+  cache::CacheEngine engine;
+  WriteString(engine, "k", "v1", 100);
+  WriteString(engine, "k", "v2", 200);
+
+  repl::MasterReplicator master(&engine);
+  repl::Frame hello = repl::Frame::Hello(
+      "replica-a", 1, "", {{common::SlotForKey("k"), 1}});
+  std::string session = master.OnHello(hello);
+
+  auto frames = master.BuildFramesForReplica("replica-a", 16, 1000);
+  test::Require(!frames.empty(), "master emits frames");
+  test::Require(frames[0].subcmd == repl::Subcmd::kLog,
+                "available backlog streams LOG");
+  test::RequireEqual(frames[0].session_id, session, "session id attached");
+  test::Require(frames[0].record.seq == 2, "streams next log");
+}
+
+CACHE_TEST(MasterHelloSnapshotsWhenBacklogMissing) {
+  cache::CacheEngine engine;
+  WriteString(engine, "k", "v1", 100);
+  const std::size_t slot = common::SlotForKey("k");
+  engine.SlotById(slot).AckLogsThrough(1);
+
+  repl::MasterReplicator master(&engine);
+  repl::Frame hello = repl::Frame::Hello("replica-a", 1, "", {{slot, 0}});
+  std::string session = master.OnHello(hello);
+
+  auto frames = master.BuildFramesForReplica("replica-a", 16, 1000);
+  test::Require(!frames.empty(), "master emits frames");
+  test::Require(frames[0].subcmd == repl::Subcmd::kSnapshot,
+                "missing backlog sends snapshot");
+  test::RequireEqual(frames[0].session_id, session, "session id attached");
+  test::Require(frames[0].slot_id == slot, "snapshot slot");
+}
+
+CACHE_TEST(MasterAckCleanupUsesSlowestReplica) {
+  cache::CacheEngine engine;
+  WriteString(engine, "k", "v1", 100);
+  WriteString(engine, "k", "v2", 200);
+  const std::size_t slot = common::SlotForKey("k");
+
+  repl::MasterReplicator master(&engine);
+  const std::string fast =
+      master.OnHello(repl::Frame::Hello("fast", 1, "", {{slot, 0}}));
+  const std::string slow =
+      master.OnHello(repl::Frame::Hello("slow", 1, "", {{slot, 0}}));
+
+  master.OnAck(repl::Frame::Ack(fast, {{slot, 2}}));
+  master.CollectGarbageForTest();
+  test::Require(!engine.SlotById(slot).CopyLogsAfter(0, 10).empty(),
+                "slow replica keeps logs retained");
+
+  master.OnAck(repl::Frame::Ack(slow, {{slot, 2}}));
+  master.CollectGarbageForTest();
+  test::Require(engine.SlotById(slot).CopyLogsAfter(0, 10).empty(),
+                "all replicas acked logs are removed");
+}
+
+CACHE_TEST(MasterBudgetPressureMarksLaggingSlotForSnapshot) {
+  cache::CacheEngine engine;
+  WriteString(engine, "k", "v1", 100);
+  WriteString(engine, "k", "v2", 200);
+  const std::size_t slot = common::SlotForKey("k");
+
+  repl::MasterReplicator master(&engine);
+  master.SetGlobalBinlogBudgetForTest(1);
+  master.OnHello(repl::Frame::Hello("lagging", 1, "", {{slot, 0}}));
+  master.EnforceBudgetForTest();
+
+  auto frames = master.BuildFramesForReplica("lagging", 16, 1000);
+  test::Require(!frames.empty(), "budget pressure emits frame");
+  test::Require(frames[0].subcmd == repl::Subcmd::kSnapshot,
+                "lagging slot resyncs by snapshot");
+}
