@@ -11,7 +11,11 @@ add_subdirectory(thirdparty/libco)
 
 file(GLOB_RECURSE CACHE_CORE_SRCS CONFIGURE_DEPENDS src/*.cpp)
 list(FILTER CACHE_CORE_SRCS EXCLUDE REGEX ".*/main\\.cpp$")
-add_library(cache_core STATIC ${CACHE_CORE_SRCS})
+
+file(GLOB CONN_UTIL_SRCS CONFIGURE_DEPENDS
+  thirdparty/cpp_util/conn_util/src/*.cpp)
+
+add_library(cache_core STATIC ${CACHE_CORE_SRCS} ${CONN_UTIL_SRCS})
 
 target_include_directories(cache_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src

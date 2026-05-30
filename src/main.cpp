@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include "cache/cache_engine.h"
+#include "conn_util/endpoint.h"
 #include "net/server.h"
 #include "repl/master_replicator.h"
 #include "repl/replication_link.h"
@@ -35,11 +36,10 @@ int main(int argc, char** argv) {
       config.replica_reads = true;
     } else if (arg.rfind("--master=", 0) == 0) {
       std::string value(arg.substr(9));
-      const std::size_t colon = value.find(':');
-      if (colon != std::string::npos) {
-        config.master_host = value.substr(0, colon);
-        config.master_port =
-            static_cast<std::uint16_t>(std::atoi(value.c_str() + colon + 1));
+      conn_util::Endpoint endpoint;
+      if (conn_util::Endpoint::parse(value, &endpoint)) {
+        config.master_host = endpoint.host();
+        config.master_port = endpoint.port();
       }
     } else if (arg.rfind("--replica-id=", 0) == 0) {
       config.replica_id = std::string(arg.substr(13));
