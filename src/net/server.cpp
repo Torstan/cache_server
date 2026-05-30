@@ -1,8 +1,6 @@
 #include "net/server.h"
 
-#include <arpa/inet.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <stdio.h>
@@ -26,6 +24,8 @@
 #include "common/hash.h"
 #include "common/parse_utils.h"
 #include "common/time.h"
+#include "conn_util/endpoint.h"
+#include "conn_util/socket_utils.h"
 #include "protocol/resp_codec.h"
 #include "protocol/response.h"
 #include "redis/resp.h"
@@ -363,52 +363,9 @@ class Worker {
 thread_local int g_listen_fd = -1;
 std::vector<std::unique_ptr<Worker>>* g_workers = nullptr;
 
-int SetNonBlock(int fd) {
-  int flags = fcntl(fd, F_GETFL, 0);
-  if (flags < 0) {
-    return -1;
-  }
-  return fcntl(fd, F_SETFL, flags | O_NONBLOCK | O_NDELAY);
-}
-
-void SetAddr(const char* host, std::uint16_t port, sockaddr_in* addr) {
-  memset(addr, 0, sizeof(*addr));
-  addr->sin_family = AF_INET;
-  addr->sin_port = htons(port);
-  if (host == nullptr || host[0] == '\0' || strcmp(host, "0") == 0 ||
-      strcmp(host, "0.0.0.0") == 0 || strcmp(host, "*") == 0) {
-    addr->sin_addr.s_addr = htonl(INADDR_ANY);
-    return;
-  }
-  addr->sin_addr.s_addr = inet_addr(host);
-}
-
 int CreateTcpSocket(const ServerConfig& config) {
-  const int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if (fd < 0) {
-    return -1;
-  }
-
-  int reuse = 1;
-  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-
-  sockaddr_in addr;
-  SetAddr(config.host.c_str(), config.port, &addr);
-  if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-    close(fd);
-    return -1;
-  }
-
-  if (SetNonBlock(fd) != 0) {
-    close(fd);
-    return -1;
-  }
-
-  if (listen(fd, 1024) != 0) {
-    close(fd);
-    return -1;
-  }
-  return fd;
+  conn_util::Endpoint endpoint(config.host, config.port);
+  return conn_util::CreateTcpListenSocket(endpoint, 1024);
 }
 
 void AcceptRoutine() {
@@ -428,7 +385,7 @@ void AcceptRoutine() {
       continue;
     }
 
-    if (SetNonBlock(fd) != 0) {
+    if (conn_util::SetNonBlocking(fd) != 0) {
       close(fd);
       continue;
     }
