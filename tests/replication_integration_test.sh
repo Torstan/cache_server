@@ -9,14 +9,22 @@ MASTER_PORT="${CACHE_SERVER_MASTER_PORT:-7401}"
 REPLICA_A_PORT="${CACHE_SERVER_REPLICA_A_PORT:-7402}"
 REPLICA_B_PORT="${CACHE_SERVER_REPLICA_B_PORT:-7403}"
 
-REDIS_CLI="${REDIS_CLI:-/usr/bin/redis-cli}"
+RESP_COMMAND="${ROOT}/tests/redis/harness/resp_command.tcl"
+TCLSH="${TCLSH:-}"
+if [[ -z "${TCLSH}" ]]; then
+  TCLSH="$(command -v tclsh || true)"
+fi
 
 if [[ ! -x "${SERVER}" ]]; then
   echo "missing ${SERVER}; build cache_server first" >&2
   exit 2
 fi
-if [[ ! -x "${REDIS_CLI}" ]]; then
-  echo "missing ${REDIS_CLI}; install redis-tools" >&2
+if [[ -z "${TCLSH}" || ! -x "${TCLSH}" ]]; then
+  echo "missing tclsh; install Tcl" >&2
+  exit 2
+fi
+if [[ ! -f "${RESP_COMMAND}" ]]; then
+  echo "missing ${RESP_COMMAND}" >&2
   exit 2
 fi
 
@@ -98,9 +106,15 @@ expect_contains() {
   fi
 }
 
-cli_master() { "${REDIS_CLI}" -h "${HOST}" -p "${MASTER_PORT}" "$@"; }
-cli_replica_a() { "${REDIS_CLI}" -h "${HOST}" -p "${REPLICA_A_PORT}" "$@"; }
-cli_replica_b() { "${REDIS_CLI}" -h "${HOST}" -p "${REPLICA_B_PORT}" "$@"; }
+redis_command() {
+  local port="$1"
+  shift
+  "${TCLSH}" "${RESP_COMMAND}" "${HOST}" "${port}" "$@"
+}
+
+cli_master() { redis_command "${MASTER_PORT}" "$@"; }
+cli_replica_a() { redis_command "${REPLICA_A_PORT}" "$@"; }
+cli_replica_b() { redis_command "${REPLICA_B_PORT}" "$@"; }
 
 # Launch master
 "${SERVER}" "${MASTER_PORT}" 1 64 >"${MASTER_LOG}" 2>&1 &
@@ -165,13 +179,12 @@ expect "master DEL disposable" "1"  "$(cli_master DEL disposable)"
 wait_for_convergence() {
   local port="$1"
   local label="$2"
-  local cli=("${REDIS_CLI}" -h "${HOST}" -p "${port}")
   local deadline=$(( SECONDS + 30 ))
   local got_k4=""
   local got_disposable=""
   while (( SECONDS < deadline )); do
-    got_k4="$("${cli[@]}" GET k4 2>&1 || true)"
-    got_disposable="$("${cli[@]}" EXISTS disposable 2>&1 || true)"
+    got_k4="$(redis_command "${port}" GET k4 2>&1 || true)"
+    got_disposable="$(redis_command "${port}" EXISTS disposable 2>&1 || true)"
     if [[ "${got_k4}" == "111" && "${got_disposable}" == "0" ]]; then
       return 0
     fi
@@ -187,36 +200,35 @@ wait_for_convergence "${REPLICA_B_PORT}" "replica-b"
 verify_replica() {
   local port="$1"
   local label="$2"
-  local cli=("${REDIS_CLI}" -h "${HOST}" -p "${port}")
 
-  expect "${label} GET k1"        "v1"          "$("${cli[@]}" GET k1)"
-  expect "${label} EXISTS k2"     "0"           "$("${cli[@]}" EXISTS k2)"
-  expect "${label} GET k3"        "hello world" "$("${cli[@]}" GET k3)"
-  expect "${label} GET k4"        "111"         "$("${cli[@]}" GET k4)"
+  expect "${label} GET k1"        "v1"          "$(redis_command "${port}" GET k1)"
+  expect "${label} EXISTS k2"     "0"           "$(redis_command "${port}" EXISTS k2)"
+  expect "${label} GET k3"        "hello world" "$(redis_command "${port}" GET k3)"
+  expect "${label} GET k4"        "111"         "$(redis_command "${port}" GET k4)"
 
-  expect "${label} HGET h1 a"     "1"           "$("${cli[@]}" HGET h1 a)"
-  expect "${label} HGET h1 c"     "3"           "$("${cli[@]}" HGET h1 c)"
-  expect "${label} HEXISTS h1 b"  "0"           "$("${cli[@]}" HEXISTS h1 b)"
+  expect "${label} HGET h1 a"     "1"           "$(redis_command "${port}" HGET h1 a)"
+  expect "${label} HGET h1 c"     "3"           "$(redis_command "${port}" HGET h1 c)"
+  expect "${label} HEXISTS h1 b"  "0"           "$(redis_command "${port}" HEXISTS h1 b)"
 
-  expect "${label} SISMEMBER s1 m1" "1" "$("${cli[@]}" SISMEMBER s1 m1)"
-  expect "${label} SISMEMBER s1 m2" "1" "$("${cli[@]}" SISMEMBER s1 m2)"
-  expect "${label} SISMEMBER s1 m3" "0" "$("${cli[@]}" SISMEMBER s1 m3)"
+  expect "${label} SISMEMBER s1 m1" "1" "$(redis_command "${port}" SISMEMBER s1 m1)"
+  expect "${label} SISMEMBER s1 m2" "1" "$(redis_command "${port}" SISMEMBER s1 m2)"
+  expect "${label} SISMEMBER s1 m3" "0" "$(redis_command "${port}" SISMEMBER s1 m3)"
 
-  expect "${label} ZSCORE z1 m1"  "1.5" "$("${cli[@]}" ZSCORE z1 m1)"
-  expect "${label} ZSCORE z1 m2"  "2"   "$("${cli[@]}" ZSCORE z1 m2)"
+  expect "${label} ZSCORE z1 m1"  "1.5" "$(redis_command "${port}" ZSCORE z1 m1)"
+  expect "${label} ZSCORE z1 m2"  "2"   "$(redis_command "${port}" ZSCORE z1 m2)"
   local z1_m3_score
-  z1_m3_score="$("${cli[@]}" ZSCORE z1 m3)"
+  z1_m3_score="$(redis_command "${port}" ZSCORE z1 m3)"
   expect "${label} ZSCORE z1 m3 (deleted)" "" "${z1_m3_score}"
 
   local ttl_v
-  ttl_v="$("${cli[@]}" TTL ttlkey)"
+  ttl_v="$(redis_command "${port}" TTL ttlkey)"
   expect_int_in_range "${label} TTL ttlkey" 1 100 "${ttl_v}"
 
   local ttl_k1
-  ttl_k1="$("${cli[@]}" TTL k1)"
+  ttl_k1="$(redis_command "${port}" TTL k1)"
   expect_int_in_range "${label} TTL k1" 1 200 "${ttl_k1}"
 
-  expect "${label} EXISTS disposable" "0" "$("${cli[@]}" EXISTS disposable)"
+  expect "${label} EXISTS disposable" "0" "$(redis_command "${port}" EXISTS disposable)"
 }
 
 verify_replica "${REPLICA_A_PORT}" "replica-a"

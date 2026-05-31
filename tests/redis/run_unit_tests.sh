@@ -28,7 +28,10 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 
-mapfile -t TEST_FILES < <(find "${ROOT}/tests/redis/unit" -type f -name '*.tcl' | sort)
+TEST_FILES=()
+while IFS= read -r test_file; do
+  TEST_FILES+=("${test_file}")
+done < <(find "${ROOT}/tests/redis/unit" -type f -name '*.tcl' | sort)
 if [[ ${#TEST_FILES[@]} -eq 0 ]]; then
   echo "no redis unit test files found" >&2
   exit 2
