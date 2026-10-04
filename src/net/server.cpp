@@ -18,9 +18,7 @@
 #include <utility>
 #include <vector>
 
-#include "co_epoll.h"
 #include "co_routine.h"
-#include "co_timeout.h"
 #include "common/hash.h"
 #include "common/parse_utils.h"
 #include "common/time.h"
@@ -39,12 +37,9 @@ namespace {
 
 using co::Coroutine;
 using co::ThreadWorker;
-using co::TimeoutItem;
-using co::TimeoutItemLink;
 using co::co_accept;
 using co::co_create;
 using co::co_enable_hook_sys;
-using co::co_get_curr_thread_env;
 using co::co_poll;
 using co::co_resume;
 using co::co_yield_ct;
@@ -64,8 +59,6 @@ struct Task {
   const ServerConfig* config = nullptr;
   repl::SlaveReplicator* slave_replicator = nullptr;
   repl::MasterReplicator* master_replicator = nullptr;
-  TimeoutItem io_event;
-  epoll_event event;
 };
 
 class Worker {
@@ -113,29 +106,10 @@ class Worker {
   }
 
  private:
-  static void OnFdReady(TimeoutItem* item) {
-    Task* task = static_cast<Task*>(item->arg);
-    co_resume(task->coroutine);
-  }
-
-  static bool RegisterFdEvent(Task* task) {
-    TimeoutItemLink::remove(&task->io_event);
-    task->io_event.arg = task;
-    task->io_event.prepare_func = nullptr;
-    task->io_event.process_func = OnFdReady;
-    task->io_event.timeout = false;
-    task->event = {};
-    task->event.data.ptr = &task->io_event;
-    task->event.events = EPOLLIN | EPOLLERR | EPOLLHUP;
-    return co_get_curr_thread_env()->Epoll()->add(task->fd, &task->event) == 0;
-  }
-
   static void CloseTask(Task* task) {
     if (task->fd < 0) {
       return;
     }
-    TimeoutItemLink::remove(&task->io_event);
-    co_get_curr_thread_env()->Epoll()->del(task->fd, &task->event);
     close(task->fd);
     task->fd = -1;
   }
@@ -277,8 +251,12 @@ class Worker {
         }
 
         if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-          co_yield_ct();
-          continue;
+          pollfd pfd = {};
+          pfd.fd = task->fd;
+          pfd.events = POLLIN | POLLERR | POLLHUP;
+          if (co_poll(&pfd, 1, -1) > 0) {
+            continue;
+          }
         }
 
         CloseTask(task);
@@ -316,12 +294,6 @@ class Worker {
       Task* task = idle_tasks.top();
       idle_tasks.pop();
       task->fd = fd;
-      if (!RegisterFdEvent(task)) {
-        close(fd);
-        task->fd = -1;
-        idle_tasks.push(task);
-        continue;
-      }
       co_resume(task->coroutine);
     }
 
