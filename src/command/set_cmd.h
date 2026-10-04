@@ -11,9 +11,7 @@ class SAddCmd : public RedisCmd {
   protocol::Response ExecCmd(
       const std::vector<std::string_view>& args, cache::CacheEngine& engine,
       std::uint64_t now_us) const override;
-  CommandResult ExecWithResult(
-      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-      std::uint64_t now_us) const override;
+
 };
 
 class SIsMemberCmd : public RedisCmd {
@@ -32,9 +30,7 @@ class SRemCmd : public RedisCmd {
   protocol::Response ExecCmd(
       const std::vector<std::string_view>& args, cache::CacheEngine& engine,
       std::uint64_t now_us) const override;
-  CommandResult ExecWithResult(
-      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-      std::uint64_t now_us) const override;
+
 };
 
 class SCardCmd : public RedisCmd {
@@ -71,9 +67,7 @@ class SPopCmd : public RedisCmd {
   protocol::Response ExecCmd(
       const std::vector<std::string_view>& args, cache::CacheEngine& engine,
       std::uint64_t now_us) const override;
-  CommandResult ExecWithResult(
-      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-      std::uint64_t now_us) const override;
+
 };
 
 class SRandMemberCmd : public RedisCmd {

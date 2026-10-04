@@ -52,11 +52,8 @@ std::optional<std::string> CheckFieldValueArity(
 }
 
 cache::BinlogRecord MakeRecord(const std::vector<std::string_view>& args,
-                               std::string_view command,
-                               std::optional<cache::BinlogOp> op =
-                                   std::nullopt) {
+                               std::string_view command) {
   cache::BinlogRecord record;
-  record.op = op;
   record.args.reserve(args.size());
   record.args.emplace_back(command);
   for (std::size_t index = 1; index < args.size(); ++index) {
@@ -120,15 +117,9 @@ std::optional<std::string> HSetCmd::CheckArity(
 protocol::Response HSetCmd::ExecCmd(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
-  return ExecWithResult(args, engine, now_us).response;
-}
-
-CommandResult HSetCmd::ExecWithResult(
-    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-    std::uint64_t now_us) const {
   std::int64_t added = 0;
   bool wrong_type = false;
-  cache::BinlogRecord record = MakeRecord(args, "HSET", cache::BinlogOp::kHSet);
+  cache::BinlogRecord record = MakeRecord(args, "HSET");
 
   engine.Update(
       args[1],
@@ -152,9 +143,9 @@ CommandResult HSetCmd::ExecWithResult(
       std::move(record), now_us);
 
   if (wrong_type) {
-    return CommandResult{protocol::Response::Error(kWrongTypeError)};
+    return protocol::Response::Error(kWrongTypeError);
   }
-  return CommandResult{protocol::Response::Integer(added)};
+  return protocol::Response::Integer(added);
 }
 
 std::optional<std::string> HGetCmd::CheckArity(
@@ -189,29 +180,22 @@ std::optional<std::string> HDelCmd::CheckArity(
 protocol::Response HDelCmd::ExecCmd(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
-  return ExecWithResult(args, engine, now_us).response;
-}
-
-CommandResult HDelCmd::ExecWithResult(
-    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-    std::uint64_t now_us) const {
   std::int64_t removed = 0;
   bool wrong_type = false;
-  bool delete_key = false;
   cache::BinlogRecord record = MakeRecord(args, "HDEL");
 
-  engine.Update(
+  engine.Mutate(
       args[1],
       [&](std::optional<cache::RedisObject> existing)
-          -> std::optional<cache::RedisObject> {
+          -> cache::MutationResult {
         if (!existing) {
-          return std::nullopt;
+          return {false, std::nullopt};
         }
         const cache::HashValue* existing_hash = existing->Hash();
         if (existing->Type() != cache::RedisObjectType::kHash ||
             existing_hash == nullptr) {
           wrong_type = true;
-          return std::nullopt;
+          return {false, std::nullopt};
         }
 
         cache::HashValue hash = *existing_hash;
@@ -229,20 +213,17 @@ CommandResult HDelCmd::ExecWithResult(
         }
 
         if (removed == 0) {
-          return std::nullopt;
+          return {false, std::nullopt};
         }
-        delete_key = hash.Empty();
-        return HashObjectWithDeadline(std::move(hash), existing->DeadlineUs());
+        if (hash.Empty()) return {true, std::nullopt};
+        return {true, HashObjectWithDeadline(std::move(hash), existing->DeadlineUs())};
       },
       std::move(record), now_us);
 
   if (wrong_type) {
-    return CommandResult{protocol::Response::Error(kWrongTypeError)};
+    return protocol::Response::Error(kWrongTypeError);
   }
-  if (delete_key) {
-    (void)engine.Del(args[1], now_us);
-  }
-  return CommandResult{protocol::Response::Integer(removed)};
+  return protocol::Response::Integer(removed);
 }
 
 std::optional<std::string> HExistsCmd::CheckArity(
@@ -341,12 +322,6 @@ std::optional<std::string> HMSetCmd::CheckArity(
 protocol::Response HMSetCmd::ExecCmd(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
-  return ExecWithResult(args, engine, now_us).response;
-}
-
-CommandResult HMSetCmd::ExecWithResult(
-    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-    std::uint64_t now_us) const {
   bool wrong_type = false;
   cache::BinlogRecord record = MakeRecord(args, "HMSET");
 
@@ -372,9 +347,9 @@ CommandResult HMSetCmd::ExecWithResult(
       std::move(record), now_us);
 
   if (wrong_type) {
-    return CommandResult{protocol::Response::Error(kWrongTypeError)};
+    return protocol::Response::Error(kWrongTypeError);
   }
-  return CommandResult{protocol::Response::SimpleString("OK")};
+  return protocol::Response::SimpleString("OK");
 }
 
 std::optional<std::string> HGetAllCmd::CheckArity(
@@ -464,15 +439,9 @@ std::optional<std::string> HIncrByCmd::CheckArity(
 protocol::Response HIncrByCmd::ExecCmd(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
-  return ExecWithResult(args, engine, now_us).response;
-}
-
-CommandResult HIncrByCmd::ExecWithResult(
-    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-    std::uint64_t now_us) const {
   std::int64_t increment = 0;
   if (!common::ParseInt64(args[3], &increment)) {
-    return CommandResult{protocol::Response::Error(kIntegerError)};
+    return protocol::Response::Error(kIntegerError);
   }
 
   bool wrong_type = false;
@@ -517,15 +486,15 @@ CommandResult HIncrByCmd::ExecWithResult(
       std::move(record), now_us);
 
   if (wrong_type) {
-    return CommandResult{protocol::Response::Error(kWrongTypeError)};
+    return protocol::Response::Error(kWrongTypeError);
   }
   if (invalid_integer) {
-    return CommandResult{protocol::Response::Error(kIntegerError)};
+    return protocol::Response::Error(kIntegerError);
   }
   if (overflow) {
-    return CommandResult{protocol::Response::Error(kOverflowError)};
+    return protocol::Response::Error(kOverflowError);
   }
-  return CommandResult{protocol::Response::Integer(result)};
+  return protocol::Response::Integer(result);
 }
 
 }  // namespace command

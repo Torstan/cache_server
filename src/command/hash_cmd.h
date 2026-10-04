@@ -11,9 +11,7 @@ class HSetCmd : public RedisCmd {
   protocol::Response ExecCmd(
       const std::vector<std::string_view>& args, cache::CacheEngine& engine,
       std::uint64_t now_us) const override;
-  CommandResult ExecWithResult(
-      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-      std::uint64_t now_us) const override;
+
 };
 
 class HGetCmd : public RedisCmd {
@@ -32,9 +30,7 @@ class HDelCmd : public RedisCmd {
   protocol::Response ExecCmd(
       const std::vector<std::string_view>& args, cache::CacheEngine& engine,
       std::uint64_t now_us) const override;
-  CommandResult ExecWithResult(
-      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-      std::uint64_t now_us) const override;
+
 };
 
 class HExistsCmd : public RedisCmd {
@@ -80,9 +76,7 @@ class HMSetCmd : public RedisCmd {
   protocol::Response ExecCmd(
       const std::vector<std::string_view>& args, cache::CacheEngine& engine,
       std::uint64_t now_us) const override;
-  CommandResult ExecWithResult(
-      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-      std::uint64_t now_us) const override;
+
 };
 
 class HGetAllCmd : public RedisCmd {
@@ -119,9 +113,7 @@ class HIncrByCmd : public RedisCmd {
   protocol::Response ExecCmd(
       const std::vector<std::string_view>& args, cache::CacheEngine& engine,
       std::uint64_t now_us) const override;
-  CommandResult ExecWithResult(
-      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-      std::uint64_t now_us) const override;
+
 };
 
 }  // namespace command

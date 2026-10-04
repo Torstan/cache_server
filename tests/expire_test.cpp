@@ -15,7 +15,6 @@ CACHE_TEST(ExpireSweeperDeletesExpiredKeysViaWritePath) {
   const std::uint64_t now_us = 1'000'000;
 
   cache::BinlogRecord record;
-  record.op = cache::BinlogOp::kSet;
   record.args = {"SET", "b7p", "v"};
   engine.Set("b7p", cache::RedisObject::MakeString("v"), std::move(record),
              now_us);

@@ -1,5 +1,49 @@
 # Cache Server Replication Design
 
+## Implemented contract — 2026-10-04
+
+The implementation uses protocol **v2**. Primary and replicas must upgrade
+together; v1 HELLO is rejected. The sections after this update retain the
+original design proposal, including superseded worker and ACK APIs.
+
+```text
+CACHE.REPL HELLO <replica_id> 2 <previous_session_id> <count> <slot_id> <applied_seq> ...
+CACHE.REPL BEGIN <session_id> <reset:0|1>
+CACHE.REPL SNAPSHOT <session_id> <slot_id> <base_seq> <payload>
+CACHE.REPL LOG <session_id> <slot_id> <seq> <written_at_us> <deadline_us> <argc> ...args
+CACHE.REPL DONE <session_id> <count> <slot_id> <target_seq> ...
+```
+
+- Each poll sends HELLO and receives BEGIN, zero or more data frames, then DONE.
+  HELLO positions also acknowledge applied records; there is no separate ACK.
+  Only DONE makes a slot readable once its target position is reached. An
+  interrupted poll resumes from applied positions. A log gap requests a snapshot
+  by reporting `UINT64_MAX` for that slot.
+- Session IDs include a primary process epoch. Unknown sessions start with
+  BEGIN reset=1, clearing old replica state before synchronization.
+- `written_at_us` and `deadline_us` are Unix microseconds. A zero deadline means
+  no expiry. Replay uses primary execution time and preserves the final deadline,
+  so transport delay does not extend TTL. Host clocks must be synchronized for
+  comparable expiry visibility. SPOP logs its selected members as SREM. DEL also
+  represents expiry and removes the stored object even if already expired.
+  Snapshots include expired stored objects: a write started before expiry may
+  commit after the image was captured and still need that object during replay.
+- One polling thread applies records in order. A replica mutex covers each whole
+  read command and each applied frame. MGET/EXISTS check every key; SCAN checks
+  each visited slot. Reads require `--replica-reads`. Replicas neither generate
+  local binlogs nor sweep expired objects ahead of replay.
+- The primary serializes session bookkeeping and batch creation; network writes
+  occur after releasing that lock. Batches rotate across slots and contain at
+  most 4096 data frames, with at most 128 log records from one slot. Data payload
+  is limited to 16 MiB per poll; one larger frame may pass so synchronization
+  can progress. Frames are sent individually. Snapshot payloads remain whole-slot
+  images; the existing frame size limits still apply. Replica TCP connection
+  attempts have a five-second timeout.
+- Periodic primary maintenance collects acknowledged logs and enforces
+  `--binlog-budget=<bytes>` (default 64 MiB) as a soft retained-log budget. Budget
+  pressure may evict unacknowledged logs; lagging replicas recover by snapshot.
+  This budget does not bound in-flight frame buffers or all process memory.
+
 ## Goal
 
 Add asynchronous single-master, multi-replica data replication to `cache_server`.

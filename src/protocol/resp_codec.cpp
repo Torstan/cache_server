@@ -2,6 +2,8 @@
 
 #include <utility>
 
+#include "common/parse_utils.h"
+
 namespace protocol {
 
 namespace {
@@ -70,9 +72,10 @@ Response Response::Array(std::vector<Response> values) {
 
 RespCodec::RespCodec(std::size_t max_stream_bytes, std::size_t max_bulk_bytes,
                      std::size_t max_array_elements)
-    : scratch_(max_array_elements + 2), max_stream_bytes_(max_stream_bytes) {
+    : max_stream_bytes_(max_stream_bytes) {
   limits_.max_bulk_bytes = max_bulk_bytes;
   limits_.max_array_elements = max_array_elements;
+  limits_.max_depth = 1;
 }
 
 bool RespCodec::AppendBytes(std::string_view bytes) {
@@ -89,10 +92,42 @@ bool RespCodec::AppendBytes(std::string_view bytes) {
   return true;
 }
 
-std::optional<CommandArgs> RespCodec::NextCommand() {
+std::optional<CommandArgs> RespCodec::NextCommand(
+    const std::function<bool(std::string_view, std::size_t)>& accept) {
   if (protocol_error_) {
     return std::nullopt;
   }
+
+  if (stream_.empty()) return std::nullopt;
+  const auto line_end = stream_.find("\r\n");
+  if (line_end == std::string::npos) return std::nullopt;
+  std::int64_t count = 0;
+  if (stream_[0] != '*' ||
+      !common::ParseInt64(std::string_view(stream_).substr(1, line_end - 1), &count) ||
+      count < 0 || static_cast<std::uint64_t>(count) > limits_.max_array_elements) {
+    protocol_error_ = true;
+    protocol_error_text_ = "invalid command array length";
+    return std::nullopt;
+  }
+  if (accept && count > 0) {
+    redis::RespValue name;
+    const auto parsed = redis::UnpackOne(std::string_view(stream_).substr(line_end + 2),
+                                         &name, 1, limits_);
+    if (parsed.status == redis::RespStatus::kNeedMore) return std::nullopt;
+    if (parsed.status != redis::RespStatus::kOk ||
+        name.type != redis::RespType::kBulkString ||
+        !accept(name.text, static_cast<std::size_t>(count))) {
+      protocol_error_ = true;
+      protocol_error_text_ = "command array length or name rejected";
+      return std::nullopt;
+    }
+  }
+  // Each bulk string requires at least "$0\r\n\r\n". Do not allocate for a
+  // large declared array before its contents arrive.
+  if (static_cast<std::uint64_t>(count) > (stream_.size() - line_end - 2) / 6) {
+    return std::nullopt;
+  }
+  scratch_.resize(static_cast<std::size_t>(count) + 1);
 
   redis::RespResult result =
       redis::UnpackOne(stream_, scratch_.data(), scratch_.size(), limits_);

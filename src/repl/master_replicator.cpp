@@ -2,50 +2,24 @@
 
 #include <algorithm>
 #include <limits>
+#include <random>
 #include <utility>
 
 #include "repl/snapshot_codec.h"
 
 namespace repl {
-
-MasterReplicator::MasterReplicator(cache::CacheEngine* engine)
-    : engine_(engine) {}
-
-void MasterReplicator::OnAck(std::size_t slot_id,
-                             std::uint64_t applied_seq) {
-  if (engine_ == nullptr || slot_id >= engine_->SlotCount()) {
-    return;
-  }
-  engine_->SlotById(slot_id).AckLogsThrough(applied_seq);
+namespace {
+constexpr std::size_t kMaxBatchPayloadBytes = 16 * 1024 * 1024;
 }
 
-std::vector<ResumeSlotPlan> MasterReplicator::BuildResumePlan(
-    const std::vector<std::pair<std::size_t, std::uint64_t>>&
-        last_applied_seq_by_slot,
-    std::size_t log_limit_per_slot) const {
-  std::vector<ResumeSlotPlan> plans;
-  if (engine_ == nullptr) {
-    return plans;
-  }
-
-  plans.reserve(last_applied_seq_by_slot.size());
-  for (const auto& item : last_applied_seq_by_slot) {
-    if (item.first >= engine_->SlotCount()) {
-      continue;
-    }
-    ResumeSlotPlan plan;
-    plan.slot_id = item.first;
-    plan.last_applied_seq = item.second;
-    plan.backlog =
-        engine_->SlotById(item.first).CopyLogsAfter(item.second,
-                                                    log_limit_per_slot);
-    plans.push_back(std::move(plan));
-  }
-  return plans;
+MasterReplicator::MasterReplicator(cache::CacheEngine* engine)
+    : engine_(engine) {
+  std::random_device random;
+  epoch_ = std::to_string(random()) + "-" + std::to_string(random());
 }
 
 std::string MasterReplicator::NewSessionId(const std::string& replica_id) {
-  return replica_id + "-" + std::to_string(next_session_seq_++);
+  return epoch_ + "-" + replica_id + "-" + std::to_string(next_session_seq_++);
 }
 
 ReplicaSession* MasterReplicator::FindReplica(
@@ -58,17 +32,7 @@ ReplicaSession* MasterReplicator::FindReplica(
   return nullptr;
 }
 
-const ReplicaSession* MasterReplicator::FindReplica(
-    const std::string& replica_id) const {
-  for (const ReplicaSession& replica : replicas_) {
-    if (replica.replica_id == replica_id) {
-      return &replica;
-    }
-  }
-  return nullptr;
-}
-
-std::string MasterReplicator::OnHello(const Frame& hello) {
+std::string MasterReplicator::OnHelloUnlocked(const Frame& hello) {
   if (engine_ == nullptr || hello.subcmd != Subcmd::kHello) {
     return "";
   }
@@ -80,7 +44,8 @@ std::string MasterReplicator::OnHello(const Frame& hello) {
     replicas_.push_back(std::move(created));
     replica = &replicas_.back();
   }
-  if (replica->session_id.empty() || hello.session_id != replica->session_id) {
+  replica->reset = replica->session_id.empty() || hello.session_id != replica->session_id;
+  if (replica->reset) {
     replica->session_id = NewSessionId(hello.replica_id);
   }
   for (const auto& item : hello.slot_positions) {
@@ -88,9 +53,11 @@ std::string MasterReplicator::OnHello(const Frame& hello) {
       continue;
     }
     ReplicaSlotState& slot = replica->slots[item.first];
-    slot.acked_seq = item.second;
-    slot.sent_seq = item.second;
-    slot.need_snapshot = !HasBacklog(item.first, item.second + 1);
+    slot.acked_seq = replica->reset ? 0 : item.second;
+    slot.sent_seq = slot.acked_seq;
+    const auto published = engine_->SlotById(item.first).Snapshot().published_seq;
+    slot.need_snapshot = slot.sent_seq > published || !HasBacklog(item.first, slot.sent_seq + 1);
+    if (slot.sent_seq > published) slot.acked_seq = slot.sent_seq = 0;
   }
   return replica->session_id;
 }
@@ -114,64 +81,103 @@ bool MasterReplicator::HasBacklog(std::size_t slot_id,
 }
 
 Frame MasterReplicator::BuildSnapshotFrame(const ReplicaSession& replica,
-                                           std::size_t slot_id,
-                                           std::uint64_t now_us) const {
+                                           std::size_t slot_id) const {
   cache::SlotSnapshot snapshot = engine_->SlotById(slot_id).Snapshot();
-  std::string payload = EncodeSnapshotPayload(snapshot.map, now_us);
+  std::string payload = EncodeSnapshotPayload(snapshot.map);
   return Frame::Snapshot(replica.session_id, slot_id, snapshot.published_seq,
                          std::move(payload));
 }
 
-std::vector<Frame> MasterReplicator::BuildFramesForReplica(
-    const std::string& replica_id, std::size_t max_frames,
-    std::uint64_t now_us) {
+
+std::vector<Frame> MasterReplicator::BuildFrames(
+    ReplicaSession& replica, std::size_t max_frames,
+    std::vector<std::pair<std::size_t, std::uint64_t>>* completed) {
   std::vector<Frame> frames;
-  if (engine_ == nullptr || max_frames == 0) {
-    return frames;
-  }
-  ReplicaSession* replica = FindReplica(replica_id);
-  if (replica == nullptr) {
-    return frames;
-  }
-  for (std::size_t slot_id = 0;
-       slot_id < replica->slots.size() && frames.size() < max_frames;
-       ++slot_id) {
-    ReplicaSlotState& slot = replica->slots[slot_id];
-    if (slot.need_snapshot) {
-      frames.push_back(BuildSnapshotFrame(*replica, slot_id, now_us));
-      slot.sent_seq = engine_->SlotById(slot_id).Snapshot().published_seq;
-      slot.need_snapshot = false;
-      continue;
+  const auto count = replica.slots.size();
+  const auto start = replica.next_slot;
+  std::size_t payload_bytes = 0;
+  bool full = false;
+  auto fits = [&](std::size_t bytes) {
+    return frames.empty() ||
+           (payload_bytes < kMaxBatchPayloadBytes &&
+            bytes <= kMaxBatchPayloadBytes - payload_bytes);
+  };
+  for (std::size_t i = 0; i < count; ++i) {
+    const auto slot_id = (start + i) % count;
+    auto& state = replica.slots[slot_id];
+    auto& slot = engine_->SlotById(slot_id);
+    auto target = slot.Snapshot().published_seq;
+    if (!full && frames.size() < max_frames) {
+      if (state.need_snapshot || !HasBacklog(slot_id, state.sent_seq + 1)) {
+        auto frame = BuildSnapshotFrame(replica, slot_id);
+        const auto bytes = frame.snapshot_payload.size();
+        if (!fits(bytes)) {
+          replica.next_slot = slot_id;
+          full = true;
+        } else {
+          payload_bytes += bytes;
+          // Use the version of the actual image, never a second live snapshot.
+          target = state.sent_seq = frame.base_seq;
+          state.need_snapshot = false;
+          frames.push_back(std::move(frame));
+        }
+      } else {
+        auto logs = slot.CopyLogsAfter(state.sent_seq,
+                                      std::min<std::size_t>(128, max_frames - frames.size()),
+                                      kMaxBatchPayloadBytes - payload_bytes);
+        for (auto& log : logs) {
+          if (log.seq > target) break;
+          if (log.seq != state.sent_seq + 1) {
+            state.need_snapshot = true;
+            break;
+          }
+          const auto bytes = cache::EstimateBinlogRecordBytes(log);
+          if (!fits(bytes)) {
+            replica.next_slot = slot_id;
+            full = true;
+            break;
+          }
+          payload_bytes += bytes;
+          state.sent_seq = log.seq;
+          frames.push_back(Frame::Log(replica.session_id, slot_id, std::move(log)));
+        }
+      }
     }
-    std::vector<cache::BinlogRecord> logs =
-        engine_->SlotById(slot_id).CopyLogsAfter(slot.sent_seq,
-                                                 max_frames - frames.size());
-    for (cache::BinlogRecord& log : logs) {
-      slot.sent_seq = log.seq;
-      frames.push_back(Frame::Log(replica->session_id, slot_id,
-                                  std::move(log)));
+    if (!full && (frames.size() >= max_frames ||
+                  payload_bytes >= kMaxBatchPayloadBytes)) {
+      replica.next_slot = (slot_id + 1) % count;
+      full = true;
     }
+    if (completed && !state.need_snapshot) completed->emplace_back(slot_id, target);
   }
   return frames;
 }
 
-void MasterReplicator::OnAck(const Frame& ack) {
-  if (ack.subcmd != Subcmd::kAck) {
-    return;
-  }
-  for (ReplicaSession& replica : replicas_) {
-    if (replica.session_id != ack.session_id) {
-      continue;
-    }
-    for (const auto& item : ack.acked_slots) {
-      if (item.first < replica.slots.size() &&
-          item.second > replica.slots[item.first].acked_seq) {
-        replica.slots[item.first].acked_seq = item.second;
-      }
-    }
-    return;
-  }
+std::vector<Frame> MasterReplicator::Poll(const Frame& hello,
+                                          std::size_t max_frames) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!engine_ || hello.subcmd != Subcmd::kHello ||
+      hello.proto_version != kProtocolVersion || hello.replica_id.empty()) return {};
+  OnHelloUnlocked(hello);
+  auto& replica = *FindReplica(hello.replica_id);
+  std::vector<std::pair<std::size_t, std::uint64_t>> completed;
+  auto frames = BuildFrames(replica, max_frames, &completed);
+  frames.insert(frames.begin(), Frame::Begin(replica.session_id, replica.reset));
+  frames.push_back(Frame::Done(replica.session_id, std::move(completed)));
+  return frames;
 }
+
+void MasterReplicator::Maintain() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  CollectGarbage();
+  EnforceBudget();
+}
+
+void MasterReplicator::SetGlobalBinlogBudget(std::size_t bytes) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  global_binlog_budget_bytes_ = bytes;
+}
+
 
 void MasterReplicator::CollectGarbage() {
   if (engine_ == nullptr || replicas_.empty()) {
@@ -188,12 +194,6 @@ void MasterReplicator::CollectGarbage() {
   }
 }
 
-void MasterReplicator::CollectGarbageForTest() { CollectGarbage(); }
-
-void MasterReplicator::SetGlobalBinlogBudgetForTest(std::size_t bytes) {
-  global_binlog_budget_bytes_ = bytes;
-}
-
 void MasterReplicator::EnforceBudget() {
   if (engine_ == nullptr) {
     return;
@@ -205,18 +205,21 @@ void MasterReplicator::EnforceBudget() {
   if (total <= global_binlog_budget_bytes_) {
     return;
   }
-  for (ReplicaSession& replica : replicas_) {
-    for (std::size_t slot_id = 0; slot_id < replica.slots.size(); ++slot_id) {
-      if (engine_->SlotById(slot_id).RetainedLogBytes() == 0) {
-        continue;
+  for (std::size_t slot_id = 0;
+       slot_id < engine_->SlotCount() && total > global_binlog_budget_bytes_;
+       ++slot_id) {
+    auto& slot = engine_->SlotById(slot_id);
+    const auto through = slot.MaxRetainedLogSeq();
+    const auto removed = slot.AckLogsThroughAndCountBytes(through);
+    total -= std::min(total, removed);
+    for (auto& replica : replicas_) {
+      if (replica.slots[slot_id].acked_seq < through) {
+        replica.slots[slot_id].need_snapshot = true;
+        replica.slots[slot_id].sent_seq = replica.slots[slot_id].acked_seq;
       }
-      replica.slots[slot_id].need_snapshot = true;
-      replica.slots[slot_id].sent_seq = replica.slots[slot_id].acked_seq;
-      return;
     }
   }
 }
 
-void MasterReplicator::EnforceBudgetForTest() { EnforceBudget(); }
 
 }  // namespace repl

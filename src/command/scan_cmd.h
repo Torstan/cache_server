@@ -4,6 +4,10 @@
 
 namespace command {
 
+protocol::Response ExecuteScan(
+    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+    std::uint64_t now_us, const std::function<bool(std::size_t)>& can_read);
+
 class ScanCmd : public RedisCmd {
  public:
   std::optional<std::string> CheckArity(

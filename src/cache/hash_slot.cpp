@@ -85,7 +85,7 @@ void HashSlot::ForEachLiveObject(
 
 WriteResult HashSlot::Set(std::string_view key, RedisObject obj,
                           BinlogRecord record, std::uint64_t now_us) {
-  (void)now_us;
+  const auto deadline_us = obj.DeadlineUs();
   const PackedString packed_key(key);
   std::lock_guard<std::mutex> write_lock(write_mutex_);
   ObjectMap next_map;
@@ -98,7 +98,7 @@ WriteResult HashSlot::Set(std::string_view key, RedisObject obj,
 
   const std::uint64_t next_seq = slot_seq_ + 1;
   record.seq = next_seq;
-  binlog_buffer_.Append(std::move(record));
+  AppendLog(std::move(record), now_us, deadline_us);
   slot_seq_ = next_seq;
 
   {
@@ -148,6 +148,8 @@ WriteResult HashSlot::Mutate(
   }
 
   const std::uint64_t next_seq = slot_seq_ + 1;
+  const auto deadline_us = mutation.object ? mutation.object->DeadlineUs() : 0;
+  if (mutation.record) record = std::move(*mutation.record);
   ObjectMap next_map;
   if (mutation.object.has_value()) {
     next_map = current_map.Set(packed_key, std::move(*mutation.object));
@@ -163,7 +165,7 @@ WriteResult HashSlot::Mutate(
   }
 
   record.seq = next_seq;
-  binlog_buffer_.Append(std::move(record));
+  AppendLog(std::move(record), now_us, deadline_us);
   slot_seq_ = next_seq;
 
   {
@@ -197,10 +199,9 @@ WriteResult HashSlot::Del(std::string_view key, std::uint64_t now_us) {
 
   BinlogRecord record;
   record.seq = next_seq;
-  record.op = BinlogOp::kDel;
   record.args = {"DEL", std::string(key)};
 
-  binlog_buffer_.Append(std::move(record));
+  AppendLog(std::move(record), now_us, 0);
   slot_seq_ = next_seq;
 
   {
@@ -257,10 +258,9 @@ std::size_t HashSlot::DeleteExpired(std::size_t max_keys,
 
     BinlogRecord record;
     record.seq = next_seq;
-    record.op = BinlogOp::kDel;
     record.args = {"DEL", key};
 
-    binlog_buffer_.Append(std::move(record));
+    AppendLog(std::move(record), now_us, 0);
     slot_seq_ = next_seq;
 
     {
@@ -301,11 +301,9 @@ bool HashSlot::Expire(std::string_view key, std::int64_t seconds,
 
   BinlogRecord record;
   record.seq = next_seq;
-  record.op = BinlogOp::kExpire;
   record.args = {"EXPIRE", std::string(key), std::to_string(seconds)};
-  record.remaining_ttl_us = ttl_us;
 
-  binlog_buffer_.Append(std::move(record));
+  AppendLog(std::move(record), now_us, deadline_us);
   slot_seq_ = next_seq;
 
   {
@@ -370,9 +368,10 @@ void HashSlot::MarkReplicaAppliedSeq(std::uint64_t seq) {
 }
 
 std::vector<BinlogRecord> HashSlot::CopyLogsAfter(std::uint64_t seq,
-                                                  std::size_t limit) const {
+                                                  std::size_t limit,
+                                                  std::size_t max_bytes) const {
   std::lock_guard<std::mutex> write_lock(write_mutex_);
-  return binlog_buffer_.CopyAfter(seq, limit);
+  return binlog_buffer_.CopyAfter(seq, limit, max_bytes);
 }
 
 std::uint64_t HashSlot::MinRetainedLogSeq() const {
@@ -398,6 +397,29 @@ std::size_t HashSlot::AckLogsThroughAndCountBytes(std::uint64_t seq) {
 void HashSlot::AckLogsThrough(std::uint64_t seq) {
   std::lock_guard<std::mutex> write_lock(write_mutex_);
   binlog_buffer_.AckThrough(seq);
+}
+
+void HashSlot::AppendLog(BinlogRecord record, std::uint64_t now_us,
+                         std::uint64_t deadline_us) {
+  if (!log_writes_) return;
+  record.written_at_us = now_us;
+  record.deadline_us = deadline_us;
+  binlog_buffer_.Append(std::move(record));
+}
+
+void HashSlot::SetLogWrites(bool enabled) {
+  std::lock_guard<std::mutex> lock(write_mutex_);
+  log_writes_ = enabled;
+  if (!enabled) binlog_buffer_.Clear();
+}
+
+void HashSlot::SetReplicaDeadline(std::string_view key, std::uint64_t deadline_us) {
+  std::lock_guard<std::mutex> lock(write_mutex_);
+  std::lock_guard<std::mutex> value_lock(value_mutex_);
+  const PackedString packed(key);
+  if (const auto* object = redis_obj_map_.Find(packed)) {
+    redis_obj_map_ = redis_obj_map_.Set(packed, object->WithDeadline(deadline_us));
+  }
 }
 
 }  // namespace cache

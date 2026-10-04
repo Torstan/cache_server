@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -21,7 +22,10 @@ class RespCodec {
                      std::size_t max_array_elements = 1024);
 
   bool AppendBytes(std::string_view bytes);
-  std::optional<CommandArgs> NextCommand();
+  // Optional request policy runs after the command name arrives, before
+  // allocating the full array. It does not participate in RESP parsing.
+  std::optional<CommandArgs> NextCommand(
+      const std::function<bool(std::string_view, std::size_t)>& accept = {});
   bool HasProtocolError() const;
   const std::string& ProtocolError() const;
   std::size_t BufferedBytes() const;

@@ -1,249 +1,141 @@
 #include "repl/slave_replicator.h"
 
-#include <stdexcept>
-#include <string>
+#include <limits>
 #include <utility>
 
 #include "common/hash.h"
+#include "common/parse_utils.h"
 #include "common/time.h"
 #include "repl/snapshot_codec.h"
 
 namespace repl {
 
-namespace {
-
-std::uint64_t ApplyNowUs() { return common::NowMicros(); }
-
-}  // namespace
-
-SlaveReplicator::SlaveReplicator(cache::CacheEngine* engine,
-                                 std::size_t apply_workers)
-    : engine_(engine),
-      apply_workers_(apply_workers == 0 ? 1 : apply_workers),
-      slot_states_(engine == nullptr ? 0 : engine->SlotCount()),
-      slot_worker_(engine == nullptr ? 0 : engine->SlotCount(), 0) {
-  for (std::size_t slot_id = 0; slot_id < slot_worker_.size(); ++slot_id) {
-    slot_worker_[slot_id] = WorkerForSlot(slot_id);
-  }
+SlaveReplicator::SlaveReplicator(cache::CacheEngine* engine)
+    : engine_(engine), slots_(engine ? engine->SlotCount() : 0) {
+  if (engine_) engine_->DisableBinlog();
 }
 
-void SlaveReplicator::EnqueueFrame(Frame frame) {
-  if (frame.subcmd == Subcmd::kSnapshot) {
-    if (IsCurrentSession(frame)) {
-      ApplySnapshot(frame);
+bool SlaveReplicator::EnqueueFrame(Frame frame) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!engine_) return false;
+  if (frame.subcmd == Subcmd::kBegin) {
+    if (frame.session_id.empty() ||
+        (!frame.reset && frame.session_id != session_id_)) return false;
+    if (frame.reset) {
+      for (std::size_t slot = 0; slot < slots_.size(); ++slot) {
+        slots_[slot] = {};
+        engine_->InstallSlotReplicaSnapshot(slot, {}, 0);
+      }
     }
-    return;
+    session_id_ = frame.session_id;
+    return true;
   }
-  if (frame.subcmd != Subcmd::kLog || !IsCurrentSession(frame)) {
-    return;
-  }
-  ApplyLogOnWorker(WorkerForSlot(frame.slot_id), frame.slot_id, frame.record,
-                   ApplyNowUs());
-}
-
-void SlaveReplicator::ApplyLogForTest(std::size_t slot_id,
-                                      const cache::BinlogRecord& record,
-                                      std::uint64_t now_us) {
-  ApplyLog(slot_id, record, now_us);
-}
-
-bool SlaveReplicator::ApplyRecordViaDispatcherForTest(
-    const cache::BinlogRecord& record, std::uint64_t now_us) {
-  if (record.args.size() < 2) {
-    return ApplyRecordViaDispatcher(record, now_us, 0);
-  }
-  return ApplyRecordViaDispatcher(record, now_us,
-                                  common::SlotForKey(record.args[1]));
-}
-
-std::uint64_t SlaveReplicator::AppliedSeqForTest(std::size_t slot_id) const {
-  const SlotApplyState* state = FindStateForSlot(slot_id);
-  return state == nullptr ? 0 : state->applied_seq;
-}
-
-std::size_t SlaveReplicator::WorkerForSlotForTest(std::size_t slot_id) const {
-  return WorkerForSlot(slot_id);
-}
-
-void SlaveReplicator::StartSessionForTest(std::string session_id) {
-  session_id_ = std::move(session_id);
-}
-
-SlaveReplicator::SlotState SlaveReplicator::SlotStateForTest(
-    std::size_t slot_id) const {
-  const SlotApplyState* state = FindStateForSlot(slot_id);
-  return state == nullptr ? SlotState::kOffline : state->state;
-}
-
-bool SlaveReplicator::CanReadSlotForTest(std::size_t slot_id) const {
-  return CanReadSlot(slot_id);
-}
-
-bool SlaveReplicator::CanReadSlot(std::size_t slot_id) const {
-  return SlotStateForTest(slot_id) == SlotState::kOnline;
-}
-
-std::size_t SlaveReplicator::SlotCount() const {
-  return slot_states_.size();
-}
-
-const std::string& SlaveReplicator::CurrentSessionId() const {
-  return session_id_;
-}
-
-bool SlaveReplicator::IsCurrentSession(const Frame& frame) const {
-  return !session_id_.empty() && frame.session_id == session_id_;
-}
-
-void SlaveReplicator::ApplyLog(std::size_t slot_id,
-                               const cache::BinlogRecord& record,
-                               std::uint64_t now_us) {
-  ApplyLogOnWorker(WorkerForSlot(slot_id), slot_id, record, now_us);
-}
-
-void SlaveReplicator::ApplyLogOnWorker(std::size_t worker_id,
-                                       std::size_t slot_id,
-                                       const cache::BinlogRecord& record,
-                                       std::uint64_t now_us) {
-  if (slot_id >= slot_worker_.size()) {
-    throw std::out_of_range("slot id out of range");
-  }
-  slot_worker_[slot_id] = worker_id;
-
-  SlotApplyState& state = StateForSlot(slot_id);
-  if (record.seq <= state.applied_seq) {
-    return;
-  }
-  if (record.seq != state.applied_seq + 1) {
-    state.pending.emplace(record.seq, record);
-    if (state.pending.size() > max_pending_logs_per_slot_) {
-      state.pending.clear();
-      state.state = SlotState::kOffline;
-    } else if (state.state == SlotState::kOnline) {
-      state.state = SlotState::kCatchingUp;
+  if (session_id_.empty() || frame.session_id != session_id_) return false;
+  if (frame.subcmd == Subcmd::kDone) {
+    for (const auto& item : frame.slot_positions) {
+      if (item.first >= slots_.size()) return false;
+      auto& state = slots_[item.first];
+      if (!state.need_snapshot) {
+        state.state = state.applied_seq >= item.second ? SlotState::kOnline : SlotState::kCatchingUp;
+      }
     }
-    return;
+    return true;
   }
+  if (frame.slot_id >= slots_.size()) return false;
+  if (frame.subcmd == Subcmd::kSnapshot) return ApplySnapshot(frame);
+  if (frame.subcmd == Subcmd::kLog) return ApplyLog(frame.slot_id, frame.record, common::NowMicros());
+  return false;
+}
 
-  if (!ApplyRecord(record, now_us, slot_id)) {
-    return;
+bool SlaveReplicator::ApplyLog(std::size_t slot, const cache::BinlogRecord& record,
+                               std::uint64_t now) {
+  if (slot >= slots_.size()) return false;
+  auto& state = slots_[slot];
+  if (state.need_snapshot) return false;
+  if (record.seq <= state.applied_seq) return true;
+  if (record.seq != state.applied_seq + 1 || !ApplyRecord(record, now, slot)) {
+    state.need_snapshot = true;
+    state.state = SlotState::kOffline;
+    return false;
   }
   state.applied_seq = record.seq;
-  if (engine_ != nullptr) {
-    engine_->MarkSlotReplicaAppliedSeq(slot_id, state.applied_seq);
-  }
-  state.state = SlotState::kOnline;
-
-  for (;;) {
-    auto next = state.pending.find(state.applied_seq + 1);
-    if (next == state.pending.end()) {
-      return;
-    }
-    cache::BinlogRecord pending = std::move(next->second);
-    state.pending.erase(next);
-    if (!ApplyRecord(pending, now_us, slot_id)) {
-      state.state = SlotState::kOffline;
-      return;
-    }
-    state.applied_seq = pending.seq;
-    if (engine_ != nullptr) {
-      engine_->MarkSlotReplicaAppliedSeq(slot_id, state.applied_seq);
-    }
-    state.state = SlotState::kOnline;
-  }
-}
-
-bool SlaveReplicator::ApplyRecordViaDispatcher(
-    const cache::BinlogRecord& record, std::uint64_t now_us,
-    std::size_t slot_id) {
-  if (engine_ == nullptr || record.args.size() < 2) {
-    return false;
-  }
-
-  const std::size_t write_slot = common::SlotForKey(record.args[1]);
-  if (write_slot != slot_id) {
-    return false;
-  }
-
-  std::vector<std::string_view> args;
-  args.reserve(record.args.size());
-  for (const std::string& arg : record.args) {
-    args.push_back(arg);
-  }
-
-  command::CommandReplayOptions replay_options;
-  replay_options.remaining_ttl_us = record.remaining_ttl_us;
-  const bool write_cmd = dispatcher_.IsWriteCommand(record.args[0]);
-  command::CommandResult result =
-      dispatcher_.ExecuteWithResult(args, *engine_, now_us, replay_options);
-  if (result.response.type == protocol::ResponseType::kError) {
-    return false;
-  }
-  if (write_cmd) {
-    engine_->SlotById(slot_id).AckLogsThrough(record.seq);
-  }
-  return write_cmd;
+  engine_->MarkSlotReplicaAppliedSeq(slot, record.seq);
+  state.state = SlotState::kCatchingUp;
+  return true;
 }
 
 bool SlaveReplicator::ApplyRecord(const cache::BinlogRecord& record,
-                                  std::uint64_t now_us,
-                                  std::size_t slot_id) {
-  return ApplyRecordViaDispatcher(record, now_us, slot_id);
+                                  std::uint64_t now, std::size_t slot) {
+  if (!engine_ || record.args.size() < 2 ||
+      common::SlotForKey(record.args[1]) != slot ||
+      !dispatcher_.IsWriteCommand(record.args[0])) return false;
+  // The primary emits one DEL per key; replay must never write another slot.
+  if (common::ToUpperAscii(record.args[0]) == "DEL") {
+    if (record.args.size() != 2) return false;
+    // DEL also represents primary expiry. Remove the stored object even when
+    // its deadline has elapsed; ordinary client DEL only sees live objects.
+    engine_->Del(record.args[1], 0);
+    return true;
+  }
+  auto result = dispatcher_.Execute(record.args, *engine_,
+                 record.written_at_us ? record.written_at_us : now);
+  if (result.type == protocol::ResponseType::kError) return false;
+  if (record.written_at_us) {
+    engine_->SlotById(slot).SetReplicaDeadline(record.args[1], record.deadline_us);
+  }
+  return true;
 }
 
-void SlaveReplicator::ApplySnapshot(const Frame& frame) {
-  if (engine_ == nullptr || frame.slot_id >= slot_states_.size()) {
-    return;
-  }
-  SlotApplyState& state = StateForSlot(frame.slot_id);
+bool SlaveReplicator::ApplySnapshot(const Frame& frame) {
+  auto& state = slots_[frame.slot_id];
   state.state = SlotState::kSnapshotting;
-
-  auto decoded = DecodeSnapshotPayload(frame.snapshot_payload);
-  if (!decoded.has_value()) {
+  auto map = DecodeSnapshotPayload(frame.snapshot_payload);
+  bool valid = map.has_value();
+  if (map) map->ForEach([&](const cache::PackedString& key, const cache::RedisObject&) {
+    if (common::SlotForKey(key.View()) != frame.slot_id) valid = false;
+  });
+  if (!valid) {
     state.state = SlotState::kOffline;
-    return;
+    state.need_snapshot = true;
+    return false;
   }
-
-  engine_->InstallSlotReplicaSnapshot(frame.slot_id, std::move(*decoded),
-                                      frame.base_seq);
+  engine_->InstallSlotReplicaSnapshot(frame.slot_id, std::move(*map), frame.base_seq);
   state.applied_seq = frame.base_seq;
-  state.pending.clear();
-  state.state = SlotState::kOnline;
-
-  for (;;) {
-    auto next = state.pending.find(state.applied_seq + 1);
-    if (next == state.pending.end()) {
-      return;
-    }
-    cache::BinlogRecord pending = std::move(next->second);
-    state.pending.erase(next);
-    if (!ApplyRecord(pending, ApplyNowUs(), frame.slot_id)) {
-      state.state = SlotState::kOffline;
-      return;
-    }
-    state.applied_seq = pending.seq;
-    engine_->MarkSlotReplicaAppliedSeq(frame.slot_id, state.applied_seq);
-  }
+  state.need_snapshot = false;
+  state.state = SlotState::kCatchingUp;
+  return true;
 }
 
-std::size_t SlaveReplicator::WorkerForSlot(std::size_t slot_id) const {
-  return slot_id % apply_workers_;
+protocol::Response SlaveReplicator::ExecuteRead(const std::vector<std::string>& args,
+                                                std::uint64_t now, bool enabled) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!engine_) return protocol::Response::Error("TRYAGAIN replica is unavailable");
+  if (!args.empty() && dispatcher_.IsWriteCommand(args[0]))
+    return protocol::Response::Error("READONLY replica does not accept writes");
+  if (!enabled) return protocol::Response::Error("READONLY replica reads are disabled");
+  return dispatcher_.ExecuteReadOnly(args, *engine_, now, [&](std::size_t slot) {
+    return slot < slots_.size() && slots_[slot].state == SlotState::kOnline;
+  });
 }
 
-SlaveReplicator::SlotApplyState& SlaveReplicator::StateForSlot(
-    std::size_t slot_id) {
-  if (slot_id >= slot_states_.size()) {
-    throw std::out_of_range("slot id out of range");
-  }
-  return slot_states_[slot_id];
+bool SlaveReplicator::CanReadSlot(std::size_t slot) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return slot < slots_.size() && slots_[slot].state == SlotState::kOnline;
 }
-
-const SlaveReplicator::SlotApplyState* SlaveReplicator::FindStateForSlot(
-    std::size_t slot_id) const {
-  if (slot_id >= slot_states_.size()) {
-    return nullptr;
+std::size_t SlaveReplicator::SlotCount() const { return slots_.size(); }
+std::string SlaveReplicator::CurrentSessionId() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return session_id_;
+}
+std::vector<std::pair<std::size_t, std::uint64_t>> SlaveReplicator::Positions() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<std::pair<std::size_t, std::uint64_t>> positions;
+  positions.reserve(slots_.size());
+  for (std::size_t i = 0; i < slots_.size(); ++i) {
+    positions.emplace_back(i, slots_[i].need_snapshot ? std::numeric_limits<std::uint64_t>::max()
+                                                     : slots_[i].applied_seq);
   }
-  return &slot_states_[slot_id];
+  return positions;
 }
 
 }  // namespace repl

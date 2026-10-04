@@ -7,6 +7,8 @@
 #include <string_view>
 #include <variant>
 
+#include "cache/binlog.h"
+
 #include "immutable_container/imt_map.h"
 #include "immutable_container/imt_set.h"
 #include "immutable_container/packed_string.h"
@@ -69,6 +71,8 @@ class RedisObject {
 struct MutationResult {
   bool changed = false;
   std::optional<RedisObject> object;
+  // Operations such as SPOP determine the replay arguments inside the lock.
+  std::optional<BinlogRecord> record;
 };
 
 using ObjectMap =

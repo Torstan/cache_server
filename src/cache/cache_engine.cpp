@@ -95,4 +95,8 @@ const HashSlot& CacheEngine::SlotById(std::size_t slot_id) const {
 
 std::size_t CacheEngine::SlotCount() const { return slots_.size(); }
 
+void CacheEngine::DisableBinlog() {
+  for (auto& slot : slots_) slot->SetLogWrites(false);
+}
+
 }  // namespace cache

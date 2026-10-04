@@ -30,8 +30,7 @@ cache::ObjectMap MapWithValues() {
 }  // namespace
 
 CACHE_TEST(SnapshotCodecRoundTripsAllObjectTypes) {
-  const std::uint64_t now_us = 1000;
-  std::string payload = repl::EncodeSnapshotPayload(MapWithValues(), now_us);
+  std::string payload = repl::EncodeSnapshotPayload(MapWithValues());
 
   auto decoded = repl::DecodeSnapshotPayload(payload);
   test::Require(decoded.has_value(), "snapshot payload decodes");
@@ -60,18 +59,19 @@ CACHE_TEST(SnapshotCodecRoundTripsAllObjectTypes) {
   test::Require(score != nullptr && *score == 1.5, "zset score decoded");
 }
 
-CACHE_TEST(SnapshotCodecSkipsExpiredObjects) {
+CACHE_TEST(SnapshotCodecPreservesExpiredObjectsForSubsequentReplay) {
   cache::ObjectMap map;
   map = map.Set(cache::PackedString("expired"),
                 cache::RedisObject::MakeString("old").WithDeadline(1000));
   map = map.Set(cache::PackedString("live"),
                 cache::RedisObject::MakeString("new").WithDeadline(3000));
 
-  std::string payload = repl::EncodeSnapshotPayload(map, 2000);
+  std::string payload = repl::EncodeSnapshotPayload(map);
   auto decoded = repl::DecodeSnapshotPayload(payload);
   test::Require(decoded.has_value(), "snapshot payload decodes");
-  test::Require(decoded->Find(cache::PackedString("expired")) == nullptr,
-                "expired object skipped");
+  const auto* expired = decoded->Find(cache::PackedString("expired"));
+  test::Require(expired != nullptr && expired->IsExpired(2000),
+                "stored object and expiry survive the snapshot");
   test::Require(decoded->Find(cache::PackedString("live")) != nullptr,
                 "live object retained");
 }

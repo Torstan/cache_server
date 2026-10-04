@@ -137,58 +137,44 @@ class Worker {
 
   static bool ProcessInput(Task* task, protocol::RespCodec* codec,
                            std::string* out) {
-    while (auto command = codec->NextCommand()) {
+    while (auto command = codec->NextCommand([task](std::string_view name, std::size_t count) {
+      return count <= 1024 || (task->master_replicator && task->config &&
+          task->config->role == ServerRole::kMaster && common::ToUpperAscii(name) == "CACHE.REPL");
+    })) {
       if (command->args.empty()) {
         continue;
       }
       if (IsCacheReplCommand(command->args) && task->config != nullptr &&
           task->config->role == ServerRole::kMaster &&
           task->master_replicator != nullptr) {
-        std::string wire;
-        redis::PackArrayHeader(command->args.size(), &wire);
-        for (const std::string& arg : command->args) {
-          redis::PackBulkString(arg, &wire);
-        }
-        auto frame = repl::DecodeFrame(wire);
-        if (!frame.has_value() || frame->subcmd != repl::Subcmd::kHello) {
-          protocol::PackResponse(
-              protocol::Response::Error("ERR invalid repl frame"), out);
+        auto frame = repl::DecodeFrame(command->args);
+        if (!frame || frame->subcmd != repl::Subcmd::kHello) {
+          protocol::PackResponse(protocol::Response::Error("ERR invalid repl frame or version"), out);
           continue;
         }
-        (void)task->master_replicator->OnHello(*frame);
-        const std::size_t max_frames = task->engine == nullptr
-                                           ? 0
-                                           : task->engine->SlotCount();
-        std::vector<repl::Frame> frames =
-            task->master_replicator->BuildFramesForReplica(
-                frame->replica_id, max_frames, common::NowMicros());
-        for (const repl::Frame& outbound : frames) {
-          out->append(repl::EncodeFrame(outbound));
+        auto frames = task->master_replicator->Poll(*frame, 4096);
+        if (!out->empty() && !WriteAll(task->fd, *out)) {
+          CloseTask(task);
+          return false;
         }
-        WriteAll(task->fd, *out);
         out->clear();
+        for (const repl::Frame& outbound : frames) {
+          const auto wire = repl::EncodeFrame(outbound);
+          if (!WriteAll(task->fd, wire)) {
+            CloseTask(task);
+            return false;
+          }
+        }
         CloseTask(task);
         return false;
       }
-      if (task->config != nullptr &&
-          task->config->role == ServerRole::kReplica &&
-          task->dispatcher->IsWriteCommand(command->args[0])) {
-        protocol::PackResponse(
-            protocol::Response::Error("READONLY replica does not accept writes"),
-            out);
+      if (task->config && task->config->role == ServerRole::kReplica) {
+        auto response = task->slave_replicator
+            ? task->slave_replicator->ExecuteRead(command->args, common::NowMicros(),
+                                                  task->config->replica_reads)
+            : protocol::Response::Error("TRYAGAIN replica is unavailable");
+        protocol::PackResponse(response, out);
         continue;
-      }
-      if (task->config != nullptr &&
-          task->config->role == ServerRole::kReplica &&
-          task->config->replica_reads && command->args.size() >= 2 &&
-          !task->dispatcher->IsWriteCommand(command->args[0])) {
-        const std::size_t slot = common::SlotForKey(command->args[1]);
-        if (task->slave_replicator != nullptr &&
-            !task->slave_replicator->CanReadSlot(slot)) {
-          protocol::PackResponse(
-              protocol::Response::Error("TRYAGAIN slot is syncing"), out);
-          continue;
-        }
       }
       protocol::PackResponse(
           task->dispatcher->Execute(command->args, *task->engine,

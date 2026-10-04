@@ -97,10 +97,8 @@ std::string FormatScore(double score) {
 }
 
 cache::BinlogRecord MakeRecord(
-    const std::vector<std::string_view>& args,
-    std::optional<cache::BinlogOp> op = std::nullopt) {
+    const std::vector<std::string_view>& args) {
   cache::BinlogRecord record;
-  record.op = op;
   record.args.reserve(args.size());
   if (!args.empty()) {
     record.args.push_back(common::ToUpperAscii(args[0]));
@@ -438,17 +436,16 @@ ZAddParseStatus ParseZAddArgs(const std::vector<std::string_view>& args,
   return ZAddParseStatus::kOk;
 }
 
-CommandResult IncrementZSetMember(
+protocol::Response IncrementZSetMember(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us, std::string_view key, double increment,
-    std::string_view member, const ZAddOptions& options,
-    std::optional<cache::BinlogOp> op) {
+    std::string_view member, const ZAddOptions& options) {
   bool wrong_type = false;
   bool prevented = false;
   bool invalid_result = false;
   bool result_ready = false;
   double result_score = 0.0;
-  cache::BinlogRecord record = MakeRecord(args, op);
+  cache::BinlogRecord record = MakeRecord(args);
 
   engine.Mutate(
       key,
@@ -504,16 +501,15 @@ CommandResult IncrementZSetMember(
       std::move(record), now_us);
 
   if (wrong_type) {
-    return CommandResult{protocol::Response::Error(kWrongTypeError)};
+    return protocol::Response::Error(kWrongTypeError);
   }
   if (invalid_result) {
-    return CommandResult{protocol::Response::Error(kInvalidIncrementError)};
+    return protocol::Response::Error(kInvalidIncrementError);
   }
   if (prevented && !result_ready) {
-    return CommandResult{protocol::Response::NullBulk()};
+    return protocol::Response::NullBulk();
   }
-  return CommandResult{
-      protocol::Response::BulkString(FormatScore(result_score))};
+  return protocol::Response::BulkString(FormatScore(result_score));
 }
 
 std::optional<protocol::Response> ParseZRangeOptions(
@@ -594,32 +590,25 @@ std::optional<std::string> ZAddCmd::CheckArity(
 protocol::Response ZAddCmd::ExecCmd(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
-  return ExecWithResult(args, engine, now_us).response;
-}
-
-CommandResult ZAddCmd::ExecWithResult(
-    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-    std::uint64_t now_us) const {
   ZAddOptions options;
   std::vector<ZAddInput> inputs;
   const ZAddParseStatus parse_status = ParseZAddArgs(args, &options, &inputs);
   if (parse_status == ZAddParseStatus::kSyntax) {
-    return CommandResult{protocol::Response::Error(kSyntaxError)};
+    return protocol::Response::Error(kSyntaxError);
   }
   if (parse_status == ZAddParseStatus::kInvalidFloat) {
-    return CommandResult{protocol::Response::Error(kInvalidFloatError)};
+    return protocol::Response::Error(kInvalidFloatError);
   }
 
   if (options.incr) {
     return IncrementZSetMember(args, engine, now_us, args[1], inputs[0].score,
-                               inputs[0].member, options,
-                               cache::BinlogOp::kZAdd);
+                               inputs[0].member, options);
   }
 
   std::int64_t added_count = 0;
   std::int64_t changed_count = 0;
   bool wrong_type = false;
-  cache::BinlogRecord record = MakeRecord(args, cache::BinlogOp::kZAdd);
+  cache::BinlogRecord record = MakeRecord(args);
 
   engine.Mutate(
       args[1],
@@ -679,10 +668,10 @@ CommandResult ZAddCmd::ExecWithResult(
       std::move(record), now_us);
 
   if (wrong_type) {
-    return CommandResult{protocol::Response::Error(kWrongTypeError)};
+    return protocol::Response::Error(kWrongTypeError);
   }
-  return CommandResult{protocol::Response::Integer(
-      options.ch ? added_count + changed_count : added_count)};
+  return protocol::Response::Integer(
+      options.ch ? added_count + changed_count : added_count);
 }
 
 std::optional<std::string> ZScoreCmd::CheckArity(
@@ -723,12 +712,6 @@ std::optional<std::string> ZRemCmd::CheckArity(
 }
 
 protocol::Response ZRemCmd::ExecCmd(
-    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-    std::uint64_t now_us) const {
-  return ExecWithResult(args, engine, now_us).response;
-}
-
-CommandResult ZRemCmd::ExecWithResult(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
   std::int64_t removed_count = 0;
@@ -772,9 +755,9 @@ CommandResult ZRemCmd::ExecWithResult(
       std::move(record), now_us);
 
   if (wrong_type) {
-    return CommandResult{protocol::Response::Error(kWrongTypeError)};
+    return protocol::Response::Error(kWrongTypeError);
   }
-  return CommandResult{protocol::Response::Integer(removed_count)};
+  return protocol::Response::Integer(removed_count);
 }
 
 std::optional<std::string> ZCardCmd::CheckArity(
@@ -872,18 +855,12 @@ std::optional<std::string> ZIncrByCmd::CheckArity(
 protocol::Response ZIncrByCmd::ExecCmd(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
-  return ExecWithResult(args, engine, now_us).response;
-}
-
-CommandResult ZIncrByCmd::ExecWithResult(
-    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-    std::uint64_t now_us) const {
   double increment = 0.0;
   if (!ParseFiniteScore(args[2], &increment)) {
-    return CommandResult{protocol::Response::Error(kInvalidFloatError)};
+    return protocol::Response::Error(kInvalidFloatError);
   }
   return IncrementZSetMember(args, engine, now_us, args[1], increment, args[3],
-                             ZAddOptions{}, std::nullopt);
+                             ZAddOptions{});
 }
 
 std::optional<std::string> ZRangeCmd::CheckArity(

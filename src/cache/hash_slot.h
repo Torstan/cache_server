@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -47,8 +48,11 @@ class HashSlot {
   SlotSnapshot Snapshot() const;
   void InstallReplicaSnapshot(ObjectMap map, std::uint64_t seq);
   void MarkReplicaAppliedSeq(std::uint64_t seq);
+  void SetLogWrites(bool enabled);
+  void SetReplicaDeadline(std::string_view key, std::uint64_t deadline_us);
   std::vector<BinlogRecord> CopyLogsAfter(std::uint64_t seq,
-                                          std::size_t limit) const;
+                                          std::size_t limit,
+                                          std::size_t max_bytes = std::numeric_limits<std::size_t>::max()) const;
   std::uint64_t MinRetainedLogSeq() const;
   std::uint64_t MaxRetainedLogSeq() const;
   std::size_t RetainedLogBytes() const;
@@ -56,12 +60,15 @@ class HashSlot {
   void AckLogsThrough(std::uint64_t seq);
 
  private:
+  void AppendLog(BinlogRecord record, std::uint64_t now_us,
+                 std::uint64_t deadline_us);
   mutable std::mutex write_mutex_;
   mutable std::mutex value_mutex_;
   ObjectMap redis_obj_map_;
   BinlogBuffer binlog_buffer_;
   std::uint64_t slot_seq_ = 0;
   std::uint64_t published_seq_ = 0;
+  bool log_writes_ = true;
 };
 
 }  // namespace cache

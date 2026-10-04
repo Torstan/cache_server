@@ -111,16 +111,6 @@ protocol::Response Exec(command::CommandDispatcher& dispatcher,
   return dispatcher.Execute(owned_args, engine, now_us);
 }
 
-command::CommandResult ExecResult(
-    command::CommandDispatcher& dispatcher, cache::CacheEngine& engine,
-    std::uint64_t now_us, std::initializer_list<std::string_view> args) {
-  std::vector<std::string> owned_args;
-  owned_args.reserve(args.size());
-  for (std::string_view arg : args) {
-    owned_args.emplace_back(arg);
-  }
-  return dispatcher.ExecuteWithResult(owned_args, engine, now_us);
-}
 
 }  // namespace
 
@@ -228,37 +218,17 @@ CACHE_TEST(ExpireUsesSaturatedTtlInBinlog) {
 
   auto logs = engine.SlotForKey("overflow").CopyLogsAfter(0, 10);
   test::Require(logs.size() == 2, "SET and EXPIRE logs are present");
-  test::Require(logs[1].op.has_value() &&
-                    *logs[1].op == cache::BinlogOp::kExpire,
-                "second log records EXPIRE");
-  test::Require(logs[1].remaining_ttl_us ==
+  test::Require(logs[1].args[0] == "EXPIRE", "second log records EXPIRE");
+  test::Require(logs[1].deadline_us ==
                     std::numeric_limits<std::uint64_t>::max(),
-                "EXPIRE log stores saturated remaining TTL");
+                "EXPIRE log stores saturated absolute deadline");
 }
 
-CACHE_TEST(CommandDispatcherReplaysExpireUsingRemainingTtlMetadata) {
+CACHE_TEST(ExpireAlwaysRequiresDuration) {
   cache::CacheEngine engine;
   command::CommandDispatcher dispatcher;
-  const std::uint64_t now_us = 1000;
-
-  (void)Exec(dispatcher, engine, now_us, {"SET", "ttl", "v"});
-
-  auto client_missing_arg = Exec(dispatcher, engine, now_us, {"EXPIRE", "ttl"});
-  test::Require(client_missing_arg.type == protocol::ResponseType::kError,
-                "normal EXPIRE still requires seconds argument");
-
-  command::CommandReplayOptions replay_options;
-  replay_options.remaining_ttl_us = std::numeric_limits<std::uint64_t>::max();
-  std::vector<std::string> replay_args = {"EXPIRE", "ttl"};
-  auto replay =
-      dispatcher.ExecuteWithResult(replay_args, engine, now_us, replay_options);
-
-  RequireType(replay.response, protocol::ResponseType::kInteger,
-              "replayed EXPIRE returns an integer");
-  test::Require(replay.response.integer == 1, "replayed EXPIRE succeeds");
-  test::Require(Exec(dispatcher, engine, now_us + 2'000'000, {"GET", "ttl"})
-                    .type == protocol::ResponseType::kBulkString,
-                "saturated replay TTL preserves key");
+  auto response = Exec(dispatcher, engine, 1000, {"EXPIRE", "ttl"});
+  test::Require(response.type == protocol::ResponseType::kError, "EXPIRE requires its duration");
 }
 
 CACHE_TEST(HashSetAndZSetCommandsMatchRedisSubset) {
@@ -328,10 +298,7 @@ CACHE_TEST(StringCommandsMatchRedis62CoreSemantics) {
   test::Require(Exec(dispatcher, engine, now_us, {"TTL", "s"}).integer > 0,
                 "SET KEEPTTL preserves TTL");
 
-  const auto unix_now_seconds =
-      std::chrono::duration_cast<std::chrono::seconds>(
-          std::chrono::system_clock::now().time_since_epoch())
-          .count();
+  const auto unix_now_seconds = now_us / 1'000'000;
   RequireSimpleString(
       Exec(dispatcher, engine, now_us,
            {"SET", "abs-sec", "v", "EXAT",
@@ -343,10 +310,7 @@ CACHE_TEST(StringCommandsMatchRedis62CoreSemantics) {
   test::Require(exat_ttl.integer >= 5 && exat_ttl.integer <= 10,
                 "SET EXAT translates unix time to relative TTL");
 
-  const auto unix_now_milliseconds =
-      std::chrono::duration_cast<std::chrono::milliseconds>(
-          std::chrono::system_clock::now().time_since_epoch())
-          .count();
+  const auto unix_now_milliseconds = now_us / 1000;
   RequireSimpleString(
       Exec(dispatcher, engine, now_us,
            {"SET", "abs-ms", "v", "PXAT",

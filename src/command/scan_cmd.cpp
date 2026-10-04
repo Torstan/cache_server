@@ -128,6 +128,12 @@ std::optional<std::string> ScanCmd::CheckArity(
 protocol::Response ScanCmd::ExecCmd(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
+  return ExecuteScan(args, engine, now_us, {});
+}
+
+protocol::Response ExecuteScan(
+    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
+    std::uint64_t now_us, const std::function<bool(std::size_t)>& can_read) {
   ScanOptions options;
   if (auto error = ParseOptions(args, engine, &options)) {
     return protocol::Response::Error(*error);
@@ -137,6 +143,8 @@ protocol::Response ScanCmd::ExecCmd(
   std::size_t scanned_keys = 0;
   std::size_t slot = options.cursor;
   while (slot < engine.SlotCount()) {
+    if (can_read && !can_read(slot))
+      return protocol::Response::Error("TRYAGAIN slot is syncing");
     engine.ForEachLiveObjectInSlot(
         slot, now_us,
         [&](const cache::PackedString& key, const cache::RedisObject& object) {

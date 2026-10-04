@@ -102,17 +102,10 @@ std::optional<std::string> SAddCmd::CheckArity(
 protocol::Response SAddCmd::ExecCmd(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
-  return ExecWithResult(args, engine, now_us).response;
-}
-
-CommandResult SAddCmd::ExecWithResult(
-    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-    std::uint64_t now_us) const {
   std::string_view key = args[1];
   std::int64_t added_count = 0;
   bool wrong_type = false;
   cache::BinlogRecord record = MakeRecord("SADD", args);
-  record.op = cache::BinlogOp::kSAdd;
 
   engine.Update(
       key,
@@ -147,9 +140,9 @@ CommandResult SAddCmd::ExecWithResult(
       std::move(record), now_us);
 
   if (wrong_type) {
-    return CommandResult{protocol::Response::Error(kWrongTypeError)};
+    return protocol::Response::Error(kWrongTypeError);
   }
-  return CommandResult{protocol::Response::Integer(added_count)};
+  return protocol::Response::Integer(added_count);
 }
 
 std::optional<std::string> SIsMemberCmd::CheckArity(
@@ -179,12 +172,6 @@ std::optional<std::string> SRemCmd::CheckArity(
 }
 
 protocol::Response SRemCmd::ExecCmd(
-    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-    std::uint64_t now_us) const {
-  return ExecWithResult(args, engine, now_us).response;
-}
-
-CommandResult SRemCmd::ExecWithResult(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
   std::int64_t removed_count = 0;
@@ -231,9 +218,9 @@ CommandResult SRemCmd::ExecWithResult(
       std::move(record), now_us);
 
   if (wrong_type) {
-    return CommandResult{protocol::Response::Error(kWrongTypeError)};
+    return protocol::Response::Error(kWrongTypeError);
   }
-  return CommandResult{protocol::Response::Integer(removed_count)};
+  return protocol::Response::Integer(removed_count);
 }
 
 std::optional<std::string> SCardCmd::CheckArity(
@@ -306,23 +293,17 @@ std::optional<std::string> SPopCmd::CheckArity(
 protocol::Response SPopCmd::ExecCmd(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
-  return ExecWithResult(args, engine, now_us).response;
-}
-
-CommandResult SPopCmd::ExecWithResult(
-    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-    std::uint64_t now_us) const {
   const bool has_count = args.size() == 3;
   std::int64_t parsed_count = 1;
   if (has_count) {
     if (!common::ParseInt64(args[2], &parsed_count) || parsed_count < 0) {
-      return CommandResult{protocol::Response::Error(kIntegerError)};
+      return protocol::Response::Error(kIntegerError);
     }
     if (parsed_count == 0) {
-      return CommandResult{ReadSet(
+      return ReadSet(
           engine, args[1], now_us, [](const cache::SetValue* /*set*/) {
             return protocol::Response::Array({});
-          })};
+          });
     }
   }
 
@@ -353,6 +334,9 @@ CommandResult SPopCmd::ExecWithResult(
             has_count ? static_cast<std::size_t>(parsed_count) : std::size_t{1};
         picked = PickUniqueMembers(std::move(members), requested);
 
+        cache::BinlogRecord removal;
+        removal.args = {"SREM", std::string(args[1])};
+        for (const auto& member : picked) removal.args.push_back(member.ToString());
         cache::SetValue next = *existing_set;
         for (const cache::PackedString& member : picked) {
           auto erased = next.Erase(member);
@@ -361,28 +345,26 @@ CommandResult SPopCmd::ExecWithResult(
           }
         }
         if (next.Empty()) {
-          return cache::MutationResult{true, std::nullopt};
+          return cache::MutationResult{true, std::nullopt, std::move(removal)};
         }
         cache::RedisObject obj = cache::RedisObject::MakeSet(std::move(next));
         return cache::MutationResult{
             true,
             existing->DeadlineUs() ? obj.WithDeadline(existing->DeadlineUs())
-                                   : obj};
+                                   : obj, std::move(removal)};
       },
       std::move(record), now_us);
 
   if (wrong_type) {
-    return CommandResult{protocol::Response::Error(kWrongTypeError)};
+    return protocol::Response::Error(kWrongTypeError);
   }
   if (has_count) {
-    return CommandResult{
-        protocol::Response::Array(MembersToResponses(picked))};
+    return protocol::Response::Array(MembersToResponses(picked));
   }
   if (picked.empty()) {
-    return CommandResult{protocol::Response::NullBulk()};
+    return protocol::Response::NullBulk();
   }
-  return CommandResult{
-      protocol::Response::BulkString(picked.front().ToString())};
+  return protocol::Response::BulkString(picked.front().ToString());
 }
 
 std::optional<std::string> SRandMemberCmd::CheckArity(

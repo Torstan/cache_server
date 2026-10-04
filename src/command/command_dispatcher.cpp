@@ -61,7 +61,7 @@ CommandDispatcher::CommandDispatcher() {
 
   commands_["SET"] = {&set_cmd, true};
   commands_["GET"] = {&get_cmd, false};
-  commands_["MGET"] = {&mget_cmd, false};
+  commands_["MGET"] = {&mget_cmd, false, true};
   commands_["SETNX"] = {&setnx_cmd, true};
   commands_["GETSET"] = {&getset_cmd, true};
   commands_["STRLEN"] = {&strlen_cmd, false};
@@ -99,7 +99,7 @@ CommandDispatcher::CommandDispatcher() {
   commands_["ZCOUNT"] = {&zcount_cmd, false};
   commands_["ZINCRBY"] = {&zincrby_cmd, true};
   commands_["ZRANGE"] = {&zrange_cmd, false};
-  commands_["EXISTS"] = {&exists_cmd, false};
+  commands_["EXISTS"] = {&exists_cmd, false, true};
   commands_["TYPE"] = {&type_cmd, false};
   commands_["PTTL"] = {&pttl_cmd, false};
   commands_["SCAN"] = {&scan_cmd, false};
@@ -114,63 +114,42 @@ bool CommandDispatcher::IsWriteCommand(std::string_view command) const {
   return it != commands_.end() && it->second.write_cmd;
 }
 
+protocol::Response CommandDispatcher::ExecuteReadOnly(
+    const std::vector<std::string>& args, cache::CacheEngine& engine,
+    std::uint64_t now_us, const std::function<bool(std::size_t)>& can_read) const {
+  if (args.empty()) return protocol::Response::Error("ERR empty command");
+  const auto name = common::ToUpperAscii(args[0]);
+  const auto entry = commands_.find(name);
+  if (entry == commands_.end()) return Execute(args, engine, now_us);
+  if (entry->second.write_cmd)
+    return protocol::Response::Error("READONLY replica does not accept writes");
+  std::vector<std::string_view> views(args.begin(), args.end());
+  if (auto error = entry->second.cmd->CheckArity(views))
+    return protocol::Response::Error(*error);
+  if (name == "SCAN") return ExecuteScan(views, engine, now_us, can_read);
+  const auto end = entry->second.multi_key ? args.size() : std::size_t{2};
+  for (std::size_t i = 1; i < end; ++i) {
+    if (!can_read(common::SlotForKey(args[i])))
+      return protocol::Response::Error("TRYAGAIN slot is syncing");
+  }
+  return Execute(views, engine, now_us);
+}
+
 protocol::Response CommandDispatcher::Execute(
     const std::vector<std::string>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
-  return ExecuteWithResult(args, engine, now_us).response;
+  return Execute(std::vector<std::string_view>(args.begin(), args.end()), engine, now_us);
 }
 
 protocol::Response CommandDispatcher::Execute(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
-  return ExecuteWithResult(args, engine, now_us).response;
-}
-
-CommandResult CommandDispatcher::ExecuteWithResult(
-    const std::vector<std::string>& args, cache::CacheEngine& engine,
-    std::uint64_t now_us) const {
-  return ExecuteWithResult(args, engine, now_us, {});
-}
-
-CommandResult CommandDispatcher::ExecuteWithResult(
-    const std::vector<std::string>& args, cache::CacheEngine& engine,
-    std::uint64_t now_us,
-    const CommandReplayOptions& replay_options) const {
-  std::vector<std::string_view> views;
-  views.reserve(args.size());
-  for (const std::string& arg : args) {
-    views.push_back(arg);
-  }
-  return ExecuteWithResult(views, engine, now_us, replay_options);
-}
-
-CommandResult CommandDispatcher::ExecuteWithResult(
-    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-    std::uint64_t now_us) const {
-  return ExecuteWithResult(args, engine, now_us, {});
-}
-
-CommandResult CommandDispatcher::ExecuteWithResult(
-    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-    std::uint64_t now_us,
-    const CommandReplayOptions& replay_options) const {
-  if (args.empty()) {
-    return CommandResult{protocol::Response::Error("ERR empty command")};
-  }
-
-  std::string cmd_name = common::ToUpperAscii(args[0]);
-  auto it = commands_.find(cmd_name);
-  if (it == commands_.end()) {
-    return CommandResult{
-        protocol::Response::Error("ERR unknown command '" + cmd_name + "'")};
-  }
-
-  auto arity_error = it->second.cmd->CheckArity(args, replay_options);
-  if (arity_error) {
-    return CommandResult{protocol::Response::Error(*arity_error)};
-  }
-
-  return it->second.cmd->ExecWithResult(args, engine, now_us, replay_options);
+  if (args.empty()) return protocol::Response::Error("ERR empty command");
+  const auto name = common::ToUpperAscii(args[0]);
+  const auto entry = commands_.find(name);
+  if (entry == commands_.end()) return protocol::Response::Error("ERR unknown command '" + name + "'");
+  if (auto error = entry->second.cmd->CheckArity(args)) return protocol::Response::Error(*error);
+  return entry->second.cmd->ExecCmd(args, engine, now_us);
 }
 
 }  // namespace command

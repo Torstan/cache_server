@@ -44,6 +44,7 @@ class CacheEngine {
   void InstallSlotReplicaSnapshot(std::size_t slot_id, ObjectMap map,
                                   std::uint64_t seq);
   void MarkSlotReplicaAppliedSeq(std::size_t slot_id, std::uint64_t seq);
+  void DisableBinlog();
 
   HashSlot& SlotForKey(std::string_view key);
   const HashSlot& SlotForKey(std::string_view key) const;

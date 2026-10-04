@@ -122,6 +122,13 @@ MASTER_PID=$!
 
 wait_for_port "${MASTER_PORT}" "master"
 
+# A failed listener must stop its maintenance thread before freeing the engine.
+for _ in $(seq 1 5); do
+  startup_status=0
+  "${SERVER}" "${MASTER_PORT}" 1 64 >"${LOG_DIR}/occupied-port.log" 2>&1 || startup_status=$?
+  expect "occupied-port startup exits cleanly" "1" "${startup_status}"
+done
+
 # Launch replicas (with --replica-reads to allow GET-style verification)
 "${SERVER}" "${REPLICA_A_PORT}" 1 64 \
   --replica \
@@ -205,6 +212,9 @@ verify_replica() {
   expect "${label} EXISTS k2"     "0"           "$(redis_command "${port}" EXISTS k2)"
   expect "${label} GET k3"        "hello world" "$(redis_command "${port}" GET k3)"
   expect "${label} GET k4"        "111"         "$(redis_command "${port}" GET k4)"
+  expect "${label} MGET across slots" "v1 111" "$(redis_command "${port}" MGET k1 k4)"
+  expect "${label} EXISTS across slots" "2" "$(redis_command "${port}" EXISTS k1 k4 missing)"
+  expect_contains "${label} SCAN" "k1" "$(redis_command "${port}" SCAN 0 COUNT 1000000)"
 
   expect "${label} HGET h1 a"     "1"           "$(redis_command "${port}" HGET h1 a)"
   expect "${label} HGET h1 c"     "3"           "$(redis_command "${port}" HGET h1 c)"
@@ -239,5 +249,17 @@ readonly_out_a="$(cli_replica_a SET should_fail x 2>&1 || true)"
 expect_contains "replica-a write rejection" "READONLY" "${readonly_out_a}"
 readonly_out_b="$(cli_replica_b SET should_fail x 2>&1 || true)"
 expect_contains "replica-b write rejection" "READONLY" "${readonly_out_b}"
+
+# Default replica policy must reject reads at the actual network entry point.
+kill "${REPLICA_B_PID}"
+wait "${REPLICA_B_PID}" 2>/dev/null || true
+REPLICA_B_PID=""
+"${SERVER}" "${REPLICA_B_PORT}" 1 64 \
+  --replica "--master=${HOST}:${MASTER_PORT}" --replica-id=replica-b \
+  >>"${REPLICA_B_LOG}" 2>&1 &
+REPLICA_B_PID=$!
+wait_for_port "${REPLICA_B_PORT}" "replica-b without reads"
+expect_contains "replica-b reads disabled" "replica reads are disabled" \
+  "$(cli_replica_b GET k1 2>&1 || true)"
 
 echo "replication integration test PASSED"

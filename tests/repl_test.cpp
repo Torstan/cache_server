@@ -1,4 +1,5 @@
 #include "test_harness.h"
+#include "replication_test_access.h"
 
 #include <array>
 #include <cstdint>
@@ -23,11 +24,9 @@
 
 namespace {
 
-cache::BinlogRecord MakeRecord(std::uint64_t seq, cache::BinlogOp op,
-                               std::vector<std::string> args) {
+cache::BinlogRecord MakeRecord(std::uint64_t seq, std::vector<std::string> args) {
   cache::BinlogRecord record;
   record.seq = seq;
-  record.op = op;
   record.args = std::move(args);
   return record;
 }
@@ -35,7 +34,6 @@ cache::BinlogRecord MakeRecord(std::uint64_t seq, cache::BinlogOp op,
 void WriteString(cache::CacheEngine& engine, std::string_view key,
                  std::string_view value, std::uint64_t now_us) {
   cache::BinlogRecord record;
-  record.op = cache::BinlogOp::kSet;
   record.args = {"SET", std::string(key), std::string(value)};
   engine.Set(key, cache::RedisObject::MakeString(value), std::move(record),
              now_us);
@@ -81,7 +79,6 @@ void RequireString(cache::CacheEngine& engine, std::string_view key,
 CACHE_TEST(ReplFrameRoundTripsLog) {
   cache::BinlogRecord record;
   record.seq = 7;
-  record.op = cache::BinlogOp::kSet;
   record.args = {"SET", "k", "v"};
 
   repl::Frame frame = repl::Frame::Log("test-session", 3, record);
@@ -94,11 +91,10 @@ CACHE_TEST(ReplFrameRoundTripsLog) {
   test::Require(decoded->record.seq == 7, "seq round trips");
 }
 
-CACHE_TEST(BinlogRecordWorksWithoutOpField) {
+CACHE_TEST(BinlogRecordContainsCommandArguments) {
   cache::BinlogRecord record;
   record.seq = 1;
   record.args = {"SET", "key", "value"};
-  record.remaining_ttl_us = 0;
 
   test::RequireEqual(record.args[0], std::string("SET"), "command in args[0]");
   test::Require(record.args.size() == 3, "args complete");
@@ -107,9 +103,7 @@ CACHE_TEST(BinlogRecordWorksWithoutOpField) {
 CACHE_TEST(ReplFrameEncodesCommandNameDirectly) {
   cache::BinlogRecord record;
   record.seq = 42;
-  record.op = cache::BinlogOp::kSet;
   record.args = {"DEL", "mykey"};
-  record.remaining_ttl_us = 0;
 
   repl::Frame frame = repl::Frame::Log("test-session", 5, std::move(record));
   std::string encoded = repl::EncodeFrame(frame);
@@ -119,7 +113,6 @@ CACHE_TEST(ReplFrameEncodesCommandNameDirectly) {
   test::Require(decoded->subcmd == repl::Subcmd::kLog, "is LOG frame");
   test::Require(decoded->slot_id == 5, "slot_id preserved");
   test::Require(decoded->record.seq == 42, "seq preserved");
-  test::Require(!decoded->record.op.has_value(), "decoded op is absent");
   test::Require(decoded->record.args.size() == 2, "args count");
   test::RequireEqual(decoded->record.args[0], std::string("DEL"),
                      "command name");
@@ -134,7 +127,7 @@ CACHE_TEST(ReplFrameDecodesUnknownCommandNameDirectly) {
   redis::PackBulkString("test-session", &wire);
   redis::PackBulkString("5", &wire);
   redis::PackBulkString("42", &wire);
-  redis::PackBulkString("CUSTOM.WRITE", &wire);
+  redis::PackBulkString("1000", &wire);
   redis::PackBulkString("0", &wire);
   redis::PackBulkString("2", &wire);
   redis::PackBulkString("CUSTOM.WRITE", &wire);
@@ -197,20 +190,8 @@ CACHE_TEST(ReplFrameRoundTripsEmptyArgsLog) {
                 "empty args log element count");
   test::Require(parsed.value->elements[5].type == redis::RespType::kBulkString,
                 "command metadata is bulk string");
-  test::Require(parsed.value->elements[5].text.empty(),
+  test::Require(parsed.value->elements[5].text == "0",
                 "empty args log has empty command metadata");
-}
-
-CACHE_TEST(MasterReplicatorUsesAckToCleanLogs) {
-  cache::CacheEngine engine;
-  WriteString(engine, "k", "v1", 100);
-  WriteString(engine, "k", "v2", 200);
-
-  repl::MasterReplicator repl(&engine);
-  repl.OnAck(common::SlotForKey("k"), 2);
-
-  auto records = engine.SlotForKey("k").CopyLogsAfter(0, 10);
-  test::Require(records.empty(), "acked logs are cleaned");
 }
 
 CACHE_TEST(ReplFrameRejectsMalformedAckCount) {
@@ -225,87 +206,86 @@ CACHE_TEST(ReplFrameRejectsMalformedAckCount) {
                 "malformed ACK count is rejected");
 }
 
-CACHE_TEST(SlaveApplyHoldsOutOfOrderLogsUntilGapFilled) {
+CACHE_TEST(SlaveRequestsSnapshotForOutOfOrderLogs) {
   cache::CacheEngine engine;
-  repl::SlaveReplicator slave(&engine, 4);
+  repl::SlaveReplicator slave(&engine);
 
   cache::BinlogRecord seq2 =
-      MakeRecord(2, cache::BinlogOp::kSet, {"SET", "k", "v2"});
+      MakeRecord(2, {"SET", "k", "v2"});
   cache::BinlogRecord seq1 =
-      MakeRecord(1, cache::BinlogOp::kSet, {"SET", "k", "v1"});
+      MakeRecord(1, {"SET", "k", "v1"});
 
   const std::size_t slot = common::SlotForKey("k");
-  test::Require(slave.WorkerForSlotForTest(slot) == slot % 4,
-                "slot is routed to deterministic apply worker");
-  slave.ApplyLogForTest(slot, seq2, 1000);
+  repl::ReplicatorTestAccess::ApplyLog(slave, slot, seq2, 1000);
   test::Require(!engine.Get("k", 1000).has_value(), "seq2 waits for seq1");
 
-  slave.ApplyLogForTest(slot, seq1, 1000);
-  RequireString(engine, "k", 1000, "v2");
-  test::Require(slave.AppliedSeqForTest(slot) == 2, "applied seq advances");
+  repl::ReplicatorTestAccess::ApplyLog(slave, slot, seq1, 1000);
+  test::Require(!engine.Get("k", 1000), "gap requires a snapshot before further replay");
+  test::Require(slave.Positions()[slot].second == std::numeric_limits<std::uint64_t>::max(),
+                "next poll explicitly requests resynchronization");
 }
 
 CACHE_TEST(SlaveApplyDoesNotAdvanceSeqForMalformedLog) {
   cache::CacheEngine engine;
-  repl::SlaveReplicator slave(&engine, 4);
+  repl::SlaveReplicator slave(&engine);
 
   cache::BinlogRecord malformed =
-      MakeRecord(1, cache::BinlogOp::kSet, {"SET", "k"});
+      MakeRecord(1, {"SET", "k"});
 
   const std::size_t slot = common::SlotForKey("k");
-  slave.ApplyLogForTest(slot, malformed, 1000);
+  repl::ReplicatorTestAccess::ApplyLog(slave, slot, malformed, 1000);
 
-  test::Require(slave.AppliedSeqForTest(slot) == 0,
+  test::Require(repl::ReplicatorTestAccess::AppliedSeq(slave, slot) == 0,
                 "malformed log does not advance seq");
   test::Require(!engine.Get("k", 1000).has_value(),
                 "malformed log does not mutate data");
 }
 
-CACHE_TEST(SlaveApplyUsesCommandNameWhenOpDiffers) {
+CACHE_TEST(SlaveApplyUsesRecordedCommandName) {
   cache::CacheEngine engine;
-  repl::SlaveReplicator slave(&engine, 4);
+  repl::SlaveReplicator slave(&engine);
 
   cache::BinlogRecord mismatch =
-      MakeRecord(1, cache::BinlogOp::kDel, {"SET", "k", "v"});
+      MakeRecord(1, {"SET", "k", "v"});
 
   const std::size_t slot = common::SlotForKey("k");
-  slave.ApplyLogForTest(slot, mismatch, 1000);
+  repl::ReplicatorTestAccess::ApplyLog(slave, slot, mismatch, 1000);
 
-  test::Require(slave.AppliedSeqForTest(slot) == 1,
+  test::Require(repl::ReplicatorTestAccess::AppliedSeq(slave, slot) == 1,
                 "command-name replay advances seq");
   RequireString(engine, "k", 1000, "v");
 }
 
 CACHE_TEST(SlaveApplyRejectsReadCommandReplay) {
   cache::CacheEngine engine;
-  repl::SlaveReplicator slave(&engine, 4);
+  repl::SlaveReplicator slave(&engine);
 
   WriteString(engine, "k", "v", 1000);
-  cache::BinlogRecord read = MakeRecord(1, cache::BinlogOp::kSet, {"GET", "k"});
+  cache::BinlogRecord read = MakeRecord(1, {"GET", "k"});
 
   const std::size_t slot = common::SlotForKey("k");
-  slave.ApplyLogForTest(slot, read, 1000);
+  repl::ReplicatorTestAccess::ApplyLog(slave, slot, read, 1000);
 
-  test::Require(slave.AppliedSeqForTest(slot) == 0,
+  test::Require(repl::ReplicatorTestAccess::AppliedSeq(slave, slot) == 0,
                 "read command does not advance seq");
   RequireString(engine, "k", 1000, "v");
 }
 
 CACHE_TEST(SlaveApplyAdvancesSeqForSuccessfulNoOpWriteCommand) {
   cache::CacheEngine engine;
-  repl::SlaveReplicator slave(&engine, 4);
+  repl::SlaveReplicator slave(&engine);
   const std::uint64_t now_us = 1000;
 
   cache::BinlogRecord first =
-      MakeRecord(1, cache::BinlogOp::kSAdd, {"SADD", "s", "m"});
+      MakeRecord(1, {"SADD", "s", "m"});
   cache::BinlogRecord duplicate =
-      MakeRecord(2, cache::BinlogOp::kSAdd, {"SADD", "s", "m"});
+      MakeRecord(2, {"SADD", "s", "m"});
 
   const std::size_t slot = common::SlotForKey("s");
-  slave.ApplyLogForTest(slot, first, now_us);
-  slave.ApplyLogForTest(slot, duplicate, now_us);
+  repl::ReplicatorTestAccess::ApplyLog(slave, slot, first, now_us);
+  repl::ReplicatorTestAccess::ApplyLog(slave, slot, duplicate, now_us);
 
-  test::Require(slave.AppliedSeqForTest(slot) == 2,
+  test::Require(repl::ReplicatorTestAccess::AppliedSeq(slave, slot) == 2,
                 "successful write command advances seq even when response is 0");
   auto obj = engine.Get("s", now_us);
   test::Require(obj.has_value(), "set key exists");
@@ -319,8 +299,8 @@ CACHE_TEST(SlaveApplyAdvancesSeqForSuccessfulNoOpWriteCommand) {
 
 CACHE_TEST(SlaveApplyDecodedDelFrame) {
   cache::CacheEngine engine;
-  repl::SlaveReplicator slave(&engine, 1);
-  slave.StartSessionForTest("test-session");
+  repl::SlaveReplicator slave(&engine);
+  repl::ReplicatorTestAccess::StartSession(slave, "test-session");
   const std::uint64_t now_us = 1000;
 
   WriteString(engine, "k", "v", now_us);
@@ -341,8 +321,8 @@ CACHE_TEST(SlaveApplyDecodedDelFrame) {
 
 CACHE_TEST(SlaveApplyRejectsDecodedReadFrame) {
   cache::CacheEngine engine;
-  repl::SlaveReplicator slave(&engine, 1);
-  slave.StartSessionForTest("test-session");
+  repl::SlaveReplicator slave(&engine);
+  repl::ReplicatorTestAccess::StartSession(slave, "test-session");
   const std::uint64_t now_us = 1000;
 
   WriteString(engine, "k", "v", now_us);
@@ -357,15 +337,15 @@ CACHE_TEST(SlaveApplyRejectsDecodedReadFrame) {
 
   slave.EnqueueFrame(std::move(*decoded));
 
-  test::Require(slave.AppliedSeqForTest(common::SlotForKey("k")) == 0,
+  test::Require(repl::ReplicatorTestAccess::AppliedSeq(slave, common::SlotForKey("k")) == 0,
                 "decoded read frame does not advance seq");
   RequireString(engine, "k", now_us, "v");
 }
 
 CACHE_TEST(SlaveApplyRejectsFrameSlotKeyMismatch) {
   cache::CacheEngine engine;
-  repl::SlaveReplicator slave(&engine, 1);
-  slave.StartSessionForTest("test-session");
+  repl::SlaveReplicator slave(&engine);
+  repl::ReplicatorTestAccess::StartSession(slave, "test-session");
   const std::uint64_t now_us = 1000;
   const std::string key = "slot_mismatch_key";
   const std::size_t key_slot = common::SlotForKey(key);
@@ -381,7 +361,7 @@ CACHE_TEST(SlaveApplyRejectsFrameSlotKeyMismatch) {
 
   slave.EnqueueFrame(std::move(*decoded));
 
-  test::Require(slave.AppliedSeqForTest(frame_slot) == 0,
+  test::Require(repl::ReplicatorTestAccess::AppliedSeq(slave, frame_slot) == 0,
                 "mismatched frame slot does not advance");
   test::Require(!engine.Get(key, now_us).has_value(),
                 "mismatched frame slot does not mutate key");
@@ -390,12 +370,11 @@ CACHE_TEST(SlaveApplyRejectsFrameSlotKeyMismatch) {
 CACHE_TEST(ReplEndToEndCommandAgnostic) {
   cache::CacheEngine master_engine;
   cache::CacheEngine slave_engine;
-  repl::SlaveReplicator replicator(&slave_engine, 1);
-  replicator.StartSessionForTest("test-session");
+  repl::SlaveReplicator replicator(&slave_engine);
+  repl::ReplicatorTestAccess::StartSession(replicator, "test-session");
   const std::uint64_t now_us = 1000000;
 
   cache::BinlogRecord set_rec;
-  set_rec.op = cache::BinlogOp::kSet;
   set_rec.args = {"SET", "key1", "value1"};
   master_engine.Set("key1", cache::RedisObject::MakeString("value1"),
                     std::move(set_rec), now_us);
@@ -409,7 +388,6 @@ CACHE_TEST(ReplEndToEndCommandAgnostic) {
   std::string wire = repl::EncodeFrame(frame);
   auto decoded = repl::DecodeFrame(wire);
   test::Require(decoded.has_value(), "frame decodes");
-  test::Require(!decoded->record.op.has_value(), "decoded op is absent");
   test::Require(decoded->record.args.size() == 3, "decoded args count");
   test::RequireEqual(decoded->record.args[0], std::string("SET"),
                      "decoded command name");
@@ -428,14 +406,13 @@ CACHE_TEST(ReplEndToEndCommandAgnostic) {
 
 CACHE_TEST(SlaveApplyViaCommandDispatcher) {
   cache::CacheEngine engine;
-  repl::SlaveReplicator slave(&engine, 1);
+  repl::SlaveReplicator slave(&engine);
 
   cache::BinlogRecord record;
   record.seq = 1;
-  record.op = cache::BinlogOp::kSet;
   record.args = {"SET", "key1", "value1"};
 
-  test::Require(slave.ApplyRecordViaDispatcherForTest(record, 1000000),
+  test::Require(repl::ReplicatorTestAccess::ApplyRecord(slave, record, 1000000),
                 "dispatcher replay succeeds");
 
   auto result = engine.Get("key1", 1000000);
@@ -447,23 +424,23 @@ CACHE_TEST(SlaveApplyViaCommandDispatcher) {
                      "value matches");
 }
 
-CACHE_TEST(SlaveApplyViaCommandDispatcherUsesRemainingTtl) {
+CACHE_TEST(SlaveApplyUsesAbsoluteDeadline) {
   cache::CacheEngine engine;
-  repl::SlaveReplicator slave(&engine, 1);
+  repl::SlaveReplicator slave(&engine);
 
   cache::BinlogRecord set =
-      MakeRecord(1, cache::BinlogOp::kSet, {"SET", "ttl", "v"});
+      MakeRecord(1, {"SET", "ttl", "v"});
 
   cache::BinlogRecord expire;
   expire.seq = 2;
-  expire.op = cache::BinlogOp::kExpire;
   expire.args = {"EXPIRE", "ttl", "1"};
-  expire.remaining_ttl_us = std::numeric_limits<std::uint64_t>::max();
+  expire.deadline_us = std::numeric_limits<std::uint64_t>::max();
+  expire.written_at_us = 1000;
 
   const std::uint64_t now_us = 1000;
-  test::Require(slave.ApplyRecordViaDispatcherForTest(set, now_us),
+  test::Require(repl::ReplicatorTestAccess::ApplyRecord(slave, set, now_us),
                 "dispatcher SET replay succeeds");
-  test::Require(slave.ApplyRecordViaDispatcherForTest(expire, now_us),
+  test::Require(repl::ReplicatorTestAccess::ApplyRecord(slave, expire, now_us),
                 "dispatcher EXPIRE replay succeeds");
 
   RequireString(engine, "ttl", now_us + 2'000'000, "v");
@@ -471,12 +448,12 @@ CACHE_TEST(SlaveApplyViaCommandDispatcherUsesRemainingTtl) {
 
 CACHE_TEST(SlaveApplyViaCommandDispatcherRejectsUnknownCommand) {
   cache::CacheEngine engine;
-  repl::SlaveReplicator slave(&engine, 1);
+  repl::SlaveReplicator slave(&engine);
 
   cache::BinlogRecord record =
-      MakeRecord(1, cache::BinlogOp::kSet, {"NO_SUCH_COMMAND", "k", "v"});
+      MakeRecord(1, {"NO_SUCH_COMMAND", "k", "v"});
 
-  test::Require(!slave.ApplyRecordViaDispatcherForTest(record, 1000),
+  test::Require(!repl::ReplicatorTestAccess::ApplyRecord(slave, record, 1000),
                 "dispatcher errors are rejected");
   test::Require(!engine.Get("k", 1000).has_value(),
                 "unknown command does not mutate data");
@@ -484,97 +461,97 @@ CACHE_TEST(SlaveApplyViaCommandDispatcherRejectsUnknownCommand) {
 
 CACHE_TEST(SlaveApplyAllCommandTypesViaDispatcher) {
   cache::CacheEngine engine;
-  repl::SlaveReplicator slave(&engine, 1);
+  repl::SlaveReplicator slave(&engine);
   const std::uint64_t now_us = 1000000;
   std::map<std::size_t, std::uint64_t> next_seq;
 
-  auto apply = [&](cache::BinlogOp op, std::vector<std::string> args,
+  auto apply = [&](std::vector<std::string> args,
                    std::uint64_t ttl_us = 0) {
     const std::size_t slot = common::SlotForKey(args[1]);
     cache::BinlogRecord rec;
     rec.seq = ++next_seq[slot];
-    rec.op = op;
     rec.args = std::move(args);
-    rec.remaining_ttl_us = ttl_us;
-    slave.ApplyLogForTest(slot, rec, now_us);
+    rec.written_at_us = now_us;
+    rec.deadline_us = ttl_us ? now_us + ttl_us : 0;
+    repl::ReplicatorTestAccess::ApplyLog(slave, slot, rec, now_us);
   };
 
   // SET
-  apply(cache::BinlogOp::kSet, {"SET", "str_key", "str_val"});
+  apply({"SET", "str_key", "str_val"});
   auto str_obj = engine.Get("str_key", now_us);
   test::Require(str_obj.has_value(), "SET creates key");
   test::Require(str_obj->Type() == cache::RedisObjectType::kString,
                 "SET creates string");
 
   // HSET
-  apply(cache::BinlogOp::kHSet, {"HSET", "hash_key", "field1", "val1"});
+  apply({"HSET", "hash_key", "field1", "val1"});
   auto hash_obj = engine.Get("hash_key", now_us);
   test::Require(hash_obj.has_value(), "HSET creates key");
   test::Require(hash_obj->Type() == cache::RedisObjectType::kHash,
                 "HSET creates hash");
 
   // SADD
-  apply(cache::BinlogOp::kSAdd, {"SADD", "set_key", "member1"});
+  apply({"SADD", "set_key", "member1"});
   auto set_obj = engine.Get("set_key", now_us);
   test::Require(set_obj.has_value(), "SADD creates key");
   test::Require(set_obj->Type() == cache::RedisObjectType::kSet,
                 "SADD creates set");
 
   // ZADD
-  apply(cache::BinlogOp::kZAdd, {"ZADD", "zset_key", "1.5", "member1"});
+  apply({"ZADD", "zset_key", "1.5", "member1"});
   auto zset_obj = engine.Get("zset_key", now_us);
   test::Require(zset_obj.has_value(), "ZADD creates key");
   test::Require(zset_obj->Type() == cache::RedisObjectType::kZSet,
                 "ZADD creates zset");
 
   // DEL
-  apply(cache::BinlogOp::kDel, {"DEL", "str_key"});
+  apply({"DEL", "str_key"});
   test::Require(!engine.Get("str_key", now_us).has_value(), "DEL removes key");
 
   // EXPIRE
-  apply(cache::BinlogOp::kExpire, {"EXPIRE", "hash_key", "300"}, 300000000);
+  apply({"EXPIRE", "hash_key", "300"}, 300000000);
   auto ttl = engine.Ttl("hash_key", now_us);
   test::Require(ttl > 0, "EXPIRE sets TTL");
 }
 
 CACHE_TEST(SlaveApplySaturatedExpireDoesNotDeleteKey) {
   cache::CacheEngine engine;
-  repl::SlaveReplicator slave(&engine, 4);
+  repl::SlaveReplicator slave(&engine);
 
   cache::BinlogRecord set =
-      MakeRecord(1, cache::BinlogOp::kSet, {"SET", "ttl", "v"});
+      MakeRecord(1, {"SET", "ttl", "v"});
 
   cache::BinlogRecord expire;
   expire.seq = 2;
-  expire.op = cache::BinlogOp::kExpire;
   expire.args = {"EXPIRE", "ttl", "1"};
-  expire.remaining_ttl_us = std::numeric_limits<std::uint64_t>::max();
+  expire.deadline_us = std::numeric_limits<std::uint64_t>::max();
+  expire.written_at_us = 1000;
 
   const std::size_t slot = common::SlotForKey("ttl");
-  slave.ApplyLogForTest(slot, set, 1000);
-  slave.ApplyLogForTest(slot, expire, 1000);
+  repl::ReplicatorTestAccess::ApplyLog(slave, slot, set, 1000);
+  repl::ReplicatorTestAccess::ApplyLog(slave, slot, expire, 1000);
 
   RequireString(engine, "ttl", 1000, "v");
-  test::Require(slave.AppliedSeqForTest(slot) == 2,
+  test::Require(repl::ReplicatorTestAccess::AppliedSeq(slave, slot) == 2,
                 "saturated expire advances seq");
 }
 
 CACHE_TEST(SlaveApplyReplaysGenericCommandTypes) {
   cache::CacheEngine engine;
-  repl::SlaveReplicator slave(&engine, 4);
+  repl::SlaveReplicator slave(&engine);
   const std::uint64_t now_us = 10'000;
   std::map<std::size_t, std::uint64_t> next_seq_by_slot;
 
-  auto apply = [&](cache::BinlogOp op, std::vector<std::string> args) {
+  auto apply = [&](std::vector<std::string> args) {
     const std::size_t slot = common::SlotForKey(args[1]);
     const std::uint64_t seq = ++next_seq_by_slot[slot];
-    cache::BinlogRecord record = MakeRecord(seq, op, std::move(args));
-    slave.ApplyLogForTest(slot, record, now_us);
-    test::Require(slave.AppliedSeqForTest(slot) == record.seq,
+    cache::BinlogRecord record = MakeRecord(seq, std::move(args));
+    repl::ReplicatorTestAccess::ApplyLog(slave, slot, record, now_us);
+    test::Require(repl::ReplicatorTestAccess::AppliedSeq(slave, slot) == record.seq,
                   "applied seq advances for record");
   };
 
-  apply(cache::BinlogOp::kHSet, {"HSET", "h", "f", "v"});
+  apply({"HSET", "h", "f", "v"});
   auto hash = engine.Get("h", now_us);
   test::Require(hash.has_value(), "hash key exists");
   test::Require(hash->Type() == cache::RedisObjectType::kHash,
@@ -586,7 +563,7 @@ CACHE_TEST(SlaveApplyReplaysGenericCommandTypes) {
   test::Require(hash_value != nullptr, "hash field exists");
   test::RequireEqual(hash_value->ToString(), "v", "hash field value");
 
-  apply(cache::BinlogOp::kSAdd, {"SADD", "s", "m"});
+  apply({"SADD", "s", "m"});
   auto set = engine.Get("s", now_us);
   test::Require(set.has_value(), "set key exists");
   test::Require(set->Type() == cache::RedisObjectType::kSet,
@@ -596,7 +573,7 @@ CACHE_TEST(SlaveApplyReplaysGenericCommandTypes) {
   test::Require(set_value->Contains(cache::PackedString("m")),
                 "set member exists");
 
-  apply(cache::BinlogOp::kZAdd, {"ZADD", "z", "1.5", "m"});
+  apply({"ZADD", "z", "1.5", "m"});
   auto zset = engine.Get("z", now_us);
   test::Require(zset.has_value(), "zset key exists");
   test::Require(zset->Type() == cache::RedisObjectType::kZSet,
@@ -606,20 +583,20 @@ CACHE_TEST(SlaveApplyReplaysGenericCommandTypes) {
   const double* score = zset_value->Find(cache::PackedString("m"));
   test::Require(score != nullptr && *score == 1.5, "zset score replays");
 
-  apply(cache::BinlogOp::kSet, {"SET", "gone", "v"});
-  apply(cache::BinlogOp::kDel, {"DEL", "gone"});
+  apply({"SET", "gone", "v"});
+  apply({"DEL", "gone"});
   test::Require(!engine.Get("gone", now_us).has_value(), "DEL replays");
 }
 
 CACHE_TEST(ReplFrameRoundTripsHelloWithSlotPositions) {
   repl::Frame frame = repl::Frame::Hello(
-      "replica-a", 1, "old-session", {{3, 7}, {5, 9}});
+      "replica-a", repl::kProtocolVersion, "old-session", {{3, 7}, {5, 9}});
 
   auto decoded = repl::DecodeFrame(repl::EncodeFrame(frame));
   test::Require(decoded.has_value(), "HELLO decodes");
   test::Require(decoded->subcmd == repl::Subcmd::kHello, "is HELLO");
   test::RequireEqual(decoded->replica_id, "replica-a", "replica id");
-  test::Require(decoded->proto_version == 1, "protocol version");
+  test::Require(decoded->proto_version == repl::kProtocolVersion, "protocol version");
   test::RequireEqual(decoded->session_id, "old-session", "previous session");
   test::Require(decoded->slot_positions.size() == 2, "slot count");
   test::Require(decoded->slot_positions[0].first == 3, "first slot id");
@@ -642,7 +619,6 @@ CACHE_TEST(ReplFrameRoundTripsLogWithSession) {
   cache::BinlogRecord record;
   record.seq = 8;
   record.args = {"SET", "k", "v"};
-  record.remaining_ttl_us = 0;
 
   repl::Frame frame = repl::Frame::Log("session-2", 4, std::move(record));
 
@@ -654,44 +630,44 @@ CACHE_TEST(ReplFrameRoundTripsLogWithSession) {
   test::RequireEqual(decoded->record.args[0], "SET", "command");
 }
 
-CACHE_TEST(ReplFrameRoundTripsAckWithSession) {
-  repl::Frame frame = repl::Frame::Ack("session-3", {{1, 2}, {2, 5}});
+CACHE_TEST(ReplFrameRoundTripsCompletionWithSession) {
+  repl::Frame frame = repl::Frame::Done("session-3", {{1, 2}, {2, 5}});
 
   auto decoded = repl::DecodeFrame(repl::EncodeFrame(frame));
   test::Require(decoded.has_value(), "ACK decodes");
-  test::Require(decoded->subcmd == repl::Subcmd::kAck, "is ACK");
+  test::Require(decoded->subcmd == repl::Subcmd::kDone, "is ACK");
   test::RequireEqual(decoded->session_id, "session-3", "session id");
-  test::Require(decoded->acked_slots.size() == 2, "acked slots");
+  test::Require(decoded->slot_positions.size() == 2, "acked slots");
 }
 
 CACHE_TEST(SlaveAppliesSnapshotAtomicallyForCurrentSession) {
   cache::CacheEngine engine;
-  repl::SlaveReplicator slave(&engine, 4);
-  slave.StartSessionForTest("session-1");
+  repl::SlaveReplicator slave(&engine);
+  repl::ReplicatorTestAccess::StartSession(slave, "session-1");
 
   WriteString(engine, "old", "value", 1000);
 
   cache::ObjectMap map;
   map = map.Set(cache::PackedString("fresh"),
                 cache::RedisObject::MakeString("snapshot"));
-  std::string payload = repl::EncodeSnapshotPayload(map, 1000);
+  std::string payload = repl::EncodeSnapshotPayload(map);
   repl::Frame snapshot = repl::Frame::Snapshot(
       "session-1", common::SlotForKey("fresh"), 12, payload);
 
   slave.EnqueueFrame(std::move(snapshot));
 
   RequireString(engine, "fresh", 1000, "snapshot");
-  test::Require(slave.AppliedSeqForTest(common::SlotForKey("fresh")) == 12,
+  test::Require(repl::ReplicatorTestAccess::AppliedSeq(slave, common::SlotForKey("fresh")) == 12,
                 "snapshot applies base seq");
-  test::Require(slave.SlotStateForTest(common::SlotForKey("fresh")) ==
-                    repl::SlaveReplicator::SlotState::kOnline,
-                "snapshot slot becomes online");
+  test::Require(repl::ReplicatorTestAccess::State(slave, common::SlotForKey("fresh")) ==
+                    repl::SlaveReplicator::SlotState::kCatchingUp,
+                "snapshot waits for batch completion");
 }
 
 CACHE_TEST(SlaveRejectsOldSessionFrames) {
   cache::CacheEngine engine;
-  repl::SlaveReplicator slave(&engine, 4);
-  slave.StartSessionForTest("current");
+  repl::SlaveReplicator slave(&engine);
+  repl::ReplicatorTestAccess::StartSession(slave, "current");
 
   cache::BinlogRecord record;
   record.seq = 1;
@@ -701,22 +677,22 @@ CACHE_TEST(SlaveRejectsOldSessionFrames) {
 
   test::Require(!engine.Get("k", 1000).has_value(),
                 "old session log ignored");
-  test::Require(slave.AppliedSeqForTest(common::SlotForKey("k")) == 0,
+  test::Require(repl::ReplicatorTestAccess::AppliedSeq(slave, common::SlotForKey("k")) == 0,
                 "old session does not advance seq");
 }
 
 CACHE_TEST(SlaveKeepsSlotOfflineAfterBadSnapshotPayload) {
   cache::CacheEngine engine;
-  repl::SlaveReplicator slave(&engine, 4);
+  repl::SlaveReplicator slave(&engine);
   const std::size_t slot = common::SlotForKey("k");
-  slave.StartSessionForTest("session-1");
+  repl::ReplicatorTestAccess::StartSession(slave, "session-1");
 
   slave.EnqueueFrame(repl::Frame::Snapshot("session-1", slot, 3, "bad"));
 
-  test::Require(slave.SlotStateForTest(slot) ==
+  test::Require(repl::ReplicatorTestAccess::State(slave, slot) ==
                     repl::SlaveReplicator::SlotState::kOffline,
                 "bad snapshot leaves slot offline");
-  test::Require(slave.AppliedSeqForTest(slot) == 0,
+  test::Require(repl::ReplicatorTestAccess::AppliedSeq(slave, slot) == 0,
                 "bad snapshot does not ack");
 }
 
@@ -726,11 +702,13 @@ CACHE_TEST(MasterHelloStreamsLogsWhenBacklogAvailable) {
   WriteString(engine, "k", "v2", 200);
 
   repl::MasterReplicator master(&engine);
+  auto previous = repl::ReplicatorTestAccess::Hello(master, repl::Frame::Hello(
+      "replica-a", repl::kProtocolVersion, "", {{common::SlotForKey("k"), 0}}));
   repl::Frame hello = repl::Frame::Hello(
-      "replica-a", 1, "", {{common::SlotForKey("k"), 1}});
-  std::string session = master.OnHello(hello);
+      "replica-a", repl::kProtocolVersion, previous, {{common::SlotForKey("k"), 1}});
+  std::string session = repl::ReplicatorTestAccess::Hello(master, hello);
 
-  auto frames = master.BuildFramesForReplica("replica-a", 16, 1000);
+  auto frames = repl::ReplicatorTestAccess::Frames(master, "replica-a", 16);
   test::Require(!frames.empty(), "master emits frames");
   test::Require(frames[0].subcmd == repl::Subcmd::kLog,
                 "available backlog streams LOG");
@@ -747,9 +725,9 @@ CACHE_TEST(MasterStreamsMultipleLogsForSlotWithinBudget) {
   repl::MasterReplicator master(&engine);
   const std::size_t slot = common::SlotForKey("k");
   repl::Frame hello = repl::Frame::Hello("replica-a", 1, "", {{slot, 0}});
-  (void)master.OnHello(hello);
+  (void)repl::ReplicatorTestAccess::Hello(master, hello);
 
-  auto frames = master.BuildFramesForReplica("replica-a", 16, 1000);
+  auto frames = repl::ReplicatorTestAccess::Frames(master, "replica-a", 16);
   test::Require(frames.size() == 3,
                 "streams consecutive logs for one slot in one poll");
   for (const auto& frame : frames) {
@@ -778,10 +756,10 @@ CACHE_TEST(MasterSlotCountBudgetReachesHighSlotLog) {
 
   repl::MasterReplicator master(&engine);
   repl::Frame hello = repl::Frame::Hello("replica-a", 1, "", positions);
-  (void)master.OnHello(hello);
+  (void)repl::ReplicatorTestAccess::Hello(master, hello);
 
   auto small_budget_frames =
-      master.BuildFramesForReplica("replica-a", small_budget, 1000);
+      repl::ReplicatorTestAccess::Frames(master, "replica-a", small_budget);
   test::Require(small_budget_frames.size() == small_budget,
                 "small budget is consumed before high slot");
   for (const auto& frame : small_budget_frames) {
@@ -790,7 +768,7 @@ CACHE_TEST(MasterSlotCountBudgetReachesHighSlotLog) {
   }
 
   auto slot_budget_frames =
-      master.BuildFramesForReplica("replica-a", engine.SlotCount(), 1000);
+      repl::ReplicatorTestAccess::Frames(master, "replica-a", engine.SlotCount());
   test::Require(slot_budget_frames.size() == 1,
                 "slot-count frame budget reaches high slot log");
   test::Require(slot_budget_frames[0].subcmd == repl::Subcmd::kLog,
@@ -809,9 +787,9 @@ CACHE_TEST(MasterHelloSnapshotsWhenBacklogMissing) {
 
   repl::MasterReplicator master(&engine);
   repl::Frame hello = repl::Frame::Hello("replica-a", 1, "", {{slot, 0}});
-  std::string session = master.OnHello(hello);
+  std::string session = repl::ReplicatorTestAccess::Hello(master, hello);
 
-  auto frames = master.BuildFramesForReplica("replica-a", 16, 1000);
+  auto frames = repl::ReplicatorTestAccess::Frames(master, "replica-a", 16);
   test::Require(!frames.empty(), "master emits frames");
   test::Require(frames[0].subcmd == repl::Subcmd::kSnapshot,
                 "missing backlog sends snapshot");
@@ -827,17 +805,17 @@ CACHE_TEST(MasterAckCleanupUsesSlowestReplica) {
 
   repl::MasterReplicator master(&engine);
   const std::string fast =
-      master.OnHello(repl::Frame::Hello("fast", 1, "", {{slot, 0}}));
+      repl::ReplicatorTestAccess::Hello(master, repl::Frame::Hello("fast", 1, "", {{slot, 0}}));
   const std::string slow =
-      master.OnHello(repl::Frame::Hello("slow", 1, "", {{slot, 0}}));
+      repl::ReplicatorTestAccess::Hello(master, repl::Frame::Hello("slow", 1, "", {{slot, 0}}));
 
-  master.OnAck(repl::Frame::Ack(fast, {{slot, 2}}));
-  master.CollectGarbageForTest();
+  master.Poll(repl::Frame::Hello("fast", repl::kProtocolVersion, fast, {{slot, 2}}), 16);
+  master.Maintain();
   test::Require(!engine.SlotById(slot).CopyLogsAfter(0, 10).empty(),
                 "slow replica keeps logs retained");
 
-  master.OnAck(repl::Frame::Ack(slow, {{slot, 2}}));
-  master.CollectGarbageForTest();
+  master.Poll(repl::Frame::Hello("slow", repl::kProtocolVersion, slow, {{slot, 2}}), 16);
+  master.Maintain();
   test::Require(engine.SlotById(slot).CopyLogsAfter(0, 10).empty(),
                 "all replicas acked logs are removed");
 }
@@ -849,11 +827,11 @@ CACHE_TEST(MasterBudgetPressureMarksLaggingSlotForSnapshot) {
   const std::size_t slot = common::SlotForKey("k");
 
   repl::MasterReplicator master(&engine);
-  master.SetGlobalBinlogBudgetForTest(1);
-  master.OnHello(repl::Frame::Hello("lagging", 1, "", {{slot, 0}}));
-  master.EnforceBudgetForTest();
+  master.SetGlobalBinlogBudget(1);
+  repl::ReplicatorTestAccess::Hello(master, repl::Frame::Hello("lagging", 1, "", {{slot, 0}}));
+  master.Maintain();
 
-  auto frames = master.BuildFramesForReplica("lagging", 16, 1000);
+  auto frames = repl::ReplicatorTestAccess::Frames(master, "lagging", 16);
   test::Require(!frames.empty(), "budget pressure emits frame");
   test::Require(frames[0].subcmd == repl::Subcmd::kSnapshot,
                 "lagging slot resyncs by snapshot");
@@ -861,8 +839,8 @@ CACHE_TEST(MasterBudgetPressureMarksLaggingSlotForSnapshot) {
 
 CACHE_TEST(ReplicationLinkBuildsHelloFromSlaveState) {
   cache::CacheEngine engine;
-  repl::SlaveReplicator slave(&engine, 2);
-  slave.StartSessionForTest("old-session");
+  repl::SlaveReplicator slave(&engine);
+  repl::ReplicatorTestAccess::StartSession(slave, "old-session");
 
   repl::Frame hello =
       repl::BuildHelloFrame("replica-a", "old-session", slave, 1);
@@ -880,12 +858,11 @@ CACHE_TEST(MasterHelloTreatsInitialEmptyBacklogSlotAsCaughtUp) {
   const std::size_t slot = common::SlotForKey("empty-slot-key");
 
   std::string session =
-      master.OnHello(repl::Frame::Hello("replica-a", 1, "", {{slot, 0}}));
+      repl::ReplicatorTestAccess::Hello(master, repl::Frame::Hello("replica-a", 1, "", {{slot, 0}}));
 
   auto frames =
-      master.BuildFramesForReplica("replica-a", engine.SlotCount(), 1000);
-  test::RequireEqual(session, std::string("replica-a-1"),
-                     "initial hello creates session");
+      repl::ReplicatorTestAccess::Frames(master, "replica-a", engine.SlotCount());
+  test::Require(!session.empty(), "initial hello creates an epoch-qualified session");
   for (const repl::Frame& frame : frames) {
     test::Require(frame.slot_id != slot,
                   "initially empty slot needs no snapshot or log frame");
@@ -899,9 +876,9 @@ CACHE_TEST(MasterHelloReusesPreviousSessionForReconnect) {
   repl::MasterReplicator master(&engine);
   const std::size_t slot = common::SlotForKey("k");
   std::string first_session =
-      master.OnHello(repl::Frame::Hello("replica-a", 1, "", {{slot, 0}}));
+      repl::ReplicatorTestAccess::Hello(master, repl::Frame::Hello("replica-a", 1, "", {{slot, 0}}));
 
-  std::string resumed_session = master.OnHello(
+  std::string resumed_session = repl::ReplicatorTestAccess::Hello(master,
       repl::Frame::Hello("replica-a", 1, first_session, {{slot, 1}}));
 
   test::RequireEqual(resumed_session, first_session,
@@ -914,8 +891,8 @@ CACHE_TEST(MasterStartsNewSessionForUnknownPreviousSession) {
   const std::size_t slot = common::SlotForKey("k");
 
   std::string first_session =
-      master.OnHello(repl::Frame::Hello("replica-a", 1, "", {{slot, 0}}));
-  std::string new_session = master.OnHello(
+      repl::ReplicatorTestAccess::Hello(master, repl::Frame::Hello("replica-a", 1, "", {{slot, 0}}));
+  std::string new_session = repl::ReplicatorTestAccess::Hello(master,
       repl::Frame::Hello("replica-a", 1, "stale-session", {{slot, 0}}));
 
   test::Require(new_session != first_session,
@@ -926,13 +903,13 @@ CACHE_TEST(ReplicaConvergesAfterInitialEmptyPoll) {
   cache::CacheEngine master_engine;
   cache::CacheEngine replica_engine;
   repl::MasterReplicator master(&master_engine);
-  repl::SlaveReplicator replica(&replica_engine, 2);
+  repl::SlaveReplicator replica(&replica_engine);
 
   repl::Frame initial_hello =
       repl::BuildHelloFrame("replica-a", replica.CurrentSessionId(), replica, 1);
-  (void)master.OnHello(initial_hello);
+  (void)repl::ReplicatorTestAccess::Hello(master, initial_hello);
   auto initial_frames =
-      master.BuildFramesForReplica("replica-a", master_engine.SlotCount(), 1000);
+      repl::ReplicatorTestAccess::Frames(master, "replica-a", master_engine.SlotCount());
   test::Require(initial_frames.empty(), "empty initial poll has no frames");
   test::Require(replica.CurrentSessionId().empty(),
                 "replica has no session until it receives a frame");
@@ -947,13 +924,13 @@ CACHE_TEST(ReplicaConvergesAfterInitialEmptyPoll) {
   for (int poll = 0; poll < 3; ++poll) {
     repl::Frame hello = repl::BuildHelloFrame(
         "replica-a", replica.CurrentSessionId(), replica, 1);
-    (void)master.OnHello(hello);
-    for (repl::Frame& frame : master.BuildFramesForReplica(
-             "replica-a", master_engine.SlotCount(), 1000)) {
+    (void)repl::ReplicatorTestAccess::Hello(master, hello);
+    for (repl::Frame& frame : repl::ReplicatorTestAccess::Frames(master,
+             "replica-a", master_engine.SlotCount())) {
       if (frame.subcmd == repl::Subcmd::kSnapshot ||
           frame.subcmd == repl::Subcmd::kLog) {
         if (replica.CurrentSessionId().empty()) {
-          replica.StartSessionForTest(frame.session_id);
+          repl::ReplicatorTestAccess::StartSession(replica, frame.session_id);
         }
         replica.EnqueueFrame(std::move(frame));
       }
@@ -968,23 +945,23 @@ CACHE_TEST(MasterTwoReplicasEventuallyReceiveSameLog) {
   cache::CacheEngine replica_a_engine;
   cache::CacheEngine replica_b_engine;
   repl::MasterReplicator master(&master_engine);
-  repl::SlaveReplicator replica_a(&replica_a_engine, 2);
-  repl::SlaveReplicator replica_b(&replica_b_engine, 2);
+  repl::SlaveReplicator replica_a(&replica_a_engine);
+  repl::SlaveReplicator replica_b(&replica_b_engine);
 
   const std::size_t slot = common::SlotForKey("k");
   std::string session_a =
-      master.OnHello(repl::Frame::Hello("a", 1, "", {{slot, 0}}));
+      repl::ReplicatorTestAccess::Hello(master, repl::Frame::Hello("a", 1, "", {{slot, 0}}));
   std::string session_b =
-      master.OnHello(repl::Frame::Hello("b", 1, "", {{slot, 0}}));
-  replica_a.StartSessionForTest(session_a);
-  replica_b.StartSessionForTest(session_b);
+      repl::ReplicatorTestAccess::Hello(master, repl::Frame::Hello("b", 1, "", {{slot, 0}}));
+  repl::ReplicatorTestAccess::StartSession(replica_a, session_a);
+  repl::ReplicatorTestAccess::StartSession(replica_b, session_b);
 
   WriteString(master_engine, "k", "v", 1000);
 
-  for (repl::Frame& frame : master.BuildFramesForReplica("a", 16, 1000)) {
+  for (repl::Frame& frame : repl::ReplicatorTestAccess::Frames(master, "a", 16)) {
     replica_a.EnqueueFrame(std::move(frame));
   }
-  for (repl::Frame& frame : master.BuildFramesForReplica("b", 16, 1000)) {
+  for (repl::Frame& frame : repl::ReplicatorTestAccess::Frames(master, "b", 16)) {
     replica_b.EnqueueFrame(std::move(frame));
   }
 

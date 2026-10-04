@@ -17,7 +17,6 @@ CACHE_TEST(HashSlotPublishesWriteAndBinlogAtomically) {
   const std::uint64_t now_us = 1000;
 
   cache::BinlogRecord record;
-  record.op = cache::BinlogOp::kSet;
   record.args = {"SET", "key", "value"};
 
   cache::WriteResult result = slot.Set(

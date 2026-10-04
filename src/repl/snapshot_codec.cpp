@@ -59,18 +59,17 @@ bool IsBulk(const redis::RespValue& value) {
 
 }  // namespace
 
-std::string EncodeSnapshotPayload(const cache::ObjectMap& map,
-                                  std::uint64_t now_us) {
-  std::vector<std::pair<cache::PackedString, cache::RedisObject>> live;
+std::string EncodeSnapshotPayload(const cache::ObjectMap& map) {
+  std::vector<std::pair<cache::PackedString, cache::RedisObject>> objects;
   map.ForEach([&](const cache::PackedString& key,
                   const cache::RedisObject& object) {
-    if (!object.IsExpired(now_us)) {
-      live.push_back({key, object});
-    }
+    // A write started before expiry may commit after this snapshot. Preserve
+    // its input until the primary commits a deletion; replica reads enforce TTL.
+    objects.push_back({key, object});
   });
 
   std::size_t elements = 2;
-  for (const auto& item : live) {
+  for (const auto& item : objects) {
     const cache::RedisObject& object = item.second;
     elements += 4;
     if (object.Type() == cache::RedisObjectType::kString) {
@@ -87,8 +86,8 @@ std::string EncodeSnapshotPayload(const cache::ObjectMap& map,
   std::string out;
   redis::PackArrayHeader(elements, &out);
   PackBulk(kMagic, &out);
-  PackBulk(std::to_string(live.size()), &out);
-  for (const auto& item : live) {
+  PackBulk(std::to_string(objects.size()), &out);
+  for (const auto& item : objects) {
     const std::string key = item.first.ToString();
     const cache::RedisObject& object = item.second;
     PackBulk(key, &out);
@@ -126,8 +125,16 @@ std::string EncodeSnapshotPayload(const cache::ObjectMap& map,
 
 std::optional<cache::ObjectMap> DecodeSnapshotPayload(
     std::string_view payload) {
-  std::vector<redis::RespValue> scratch(kMaxSnapshotElements);
+  const auto line_end = payload.find("\r\n");
+  if (payload.empty() || payload[0] != '*' || line_end == std::string_view::npos)
+    return std::nullopt;
+  const auto count = ParseU64(payload.substr(1, line_end - 1));
+  // Allocate by value count, not by maximum capacity or bulk payload bytes.
+  if (!count || *count > kMaxSnapshotElements ||
+      *count > (payload.size() - line_end - 2) / 6) return std::nullopt;
+  std::vector<redis::RespValue> scratch(static_cast<std::size_t>(*count) + 1);
   redis::RespLimits limits;
+  limits.max_depth = 1;
   limits.max_array_elements = kMaxSnapshotElements;
   limits.max_bulk_bytes = payload.size();
   redis::RespResult result =

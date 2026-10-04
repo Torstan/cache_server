@@ -1,9 +1,28 @@
 #include "test_harness.h"
 
+#include <limits>
+
 #include "protocol/resp_codec.h"
 
 using protocol::RespCodec;
 using protocol::Response;
+
+CACHE_TEST(RespCodecDoesNotAllocateTheConfiguredCeiling) {
+  RespCodec codec(1024, 1024, std::numeric_limits<std::size_t>::max() - 2);
+  codec.AppendBytes("*2\r\n$3\r\nGET\r\n$1\r\na\r\n");
+  test::Require(codec.NextCommand().has_value(),
+                "small requests use memory proportional to the request");
+}
+
+CACHE_TEST(RespCodecRejectsOversizedClientArrayBeforeReadingItsBody) {
+  RespCodec codec(1024 * 1024, 1024, 1'000'000);
+  codec.AppendBytes("*5000\r\n$3\r\nGET\r\n");
+  auto command = codec.NextCommand([](std::string_view name, std::size_t count) {
+    return name == "CACHE.REPL" || count <= 1024;
+  });
+  test::Require(!command && codec.HasProtocolError(),
+                "ordinary requests cannot consume the replication array allowance");
+}
 
 CACHE_TEST(RespCodecParsesPipelineCommands) {
   RespCodec codec;

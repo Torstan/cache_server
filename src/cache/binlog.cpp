@@ -1,6 +1,7 @@
 #include "cache/binlog.h"
 
 #include <utility>
+#include <algorithm>
 
 namespace cache {
 
@@ -23,16 +24,22 @@ void BinlogBuffer::Clear() {
 }
 
 std::vector<BinlogRecord> BinlogBuffer::CopyAfter(std::uint64_t seq,
-                                                  std::size_t limit) const {
+                                                  std::size_t limit,
+                                                  std::size_t max_bytes) const {
   std::vector<BinlogRecord> result;
   if (limit == 0) {
     return result;
   }
-  result.reserve(limit);
+  result.reserve(std::min(limit, records_.size()));
+  std::size_t copied_bytes = 0;
   for (const BinlogRecord& record : records_) {
     if (record.seq > seq) {
+      const auto bytes = EstimateBinlogRecordBytes(record);
+      // Include one oversized record so a small budget cannot stall progress.
+      if (!result.empty() && bytes > max_bytes - copied_bytes) break;
       result.push_back(record);
-      if (result.size() == limit) {
+      copied_bytes += bytes;
+      if (result.size() == limit || copied_bytes >= max_bytes) {
         break;
       }
     }

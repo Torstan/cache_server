@@ -11,9 +11,7 @@ class SetCmd : public RedisCmd {
   protocol::Response ExecCmd(
       const std::vector<std::string_view>& args, cache::CacheEngine& engine,
       std::uint64_t now_us) const override;
-  CommandResult ExecWithResult(
-      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-      std::uint64_t now_us) const override;
+
 };
 
 class GetCmd : public RedisCmd {
@@ -41,9 +39,7 @@ class SetNxCmd : public RedisCmd {
   protocol::Response ExecCmd(
       const std::vector<std::string_view>& args, cache::CacheEngine& engine,
       std::uint64_t now_us) const override;
-  CommandResult ExecWithResult(
-      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-      std::uint64_t now_us) const override;
+
 };
 
 class GetSetCmd : public RedisCmd {
@@ -53,9 +49,7 @@ class GetSetCmd : public RedisCmd {
   protocol::Response ExecCmd(
       const std::vector<std::string_view>& args, cache::CacheEngine& engine,
       std::uint64_t now_us) const override;
-  CommandResult ExecWithResult(
-      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-      std::uint64_t now_us) const override;
+
 };
 
 class StrLenCmd : public RedisCmd {
@@ -74,9 +68,7 @@ class AppendCmd : public RedisCmd {
   protocol::Response ExecCmd(
       const std::vector<std::string_view>& args, cache::CacheEngine& engine,
       std::uint64_t now_us) const override;
-  CommandResult ExecWithResult(
-      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-      std::uint64_t now_us) const override;
+
 };
 
 class IncrCmd : public RedisCmd {
@@ -86,9 +78,7 @@ class IncrCmd : public RedisCmd {
   protocol::Response ExecCmd(
       const std::vector<std::string_view>& args, cache::CacheEngine& engine,
       std::uint64_t now_us) const override;
-  CommandResult ExecWithResult(
-      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-      std::uint64_t now_us) const override;
+
 };
 
 class DecrCmd : public RedisCmd {
@@ -98,9 +88,7 @@ class DecrCmd : public RedisCmd {
   protocol::Response ExecCmd(
       const std::vector<std::string_view>& args, cache::CacheEngine& engine,
       std::uint64_t now_us) const override;
-  CommandResult ExecWithResult(
-      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-      std::uint64_t now_us) const override;
+
 };
 
 class IncrByCmd : public RedisCmd {
@@ -110,9 +98,7 @@ class IncrByCmd : public RedisCmd {
   protocol::Response ExecCmd(
       const std::vector<std::string_view>& args, cache::CacheEngine& engine,
       std::uint64_t now_us) const override;
-  CommandResult ExecWithResult(
-      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-      std::uint64_t now_us) const override;
+
 };
 
 class DecrByCmd : public RedisCmd {
@@ -122,9 +108,7 @@ class DecrByCmd : public RedisCmd {
   protocol::Response ExecCmd(
       const std::vector<std::string_view>& args, cache::CacheEngine& engine,
       std::uint64_t now_us) const override;
-  CommandResult ExecWithResult(
-      const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-      std::uint64_t now_us) const override;
+
 };
 
 }  // namespace command

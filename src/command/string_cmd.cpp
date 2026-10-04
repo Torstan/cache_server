@@ -47,10 +47,8 @@ struct SetOptions {
 enum class IntegerMutationMode { kAdd, kSubtract };
 
 cache::BinlogRecord MakeRecord(
-    std::string_view command, const std::vector<std::string_view>& args,
-    std::optional<cache::BinlogOp> op = std::nullopt) {
+    std::string_view command, const std::vector<std::string_view>& args) {
   cache::BinlogRecord record;
-  record.op = op;
   record.args.reserve(args.size());
   record.args.push_back(common::ToUpperAscii(command));
   for (std::size_t i = 1; i < args.size(); ++i) {
@@ -124,13 +122,6 @@ bool CheckedAdd(std::uint64_t left, std::uint64_t right, std::uint64_t* out) {
   return true;
 }
 
-std::uint64_t UnixTimeMicros() {
-  using clock = std::chrono::system_clock;
-  return static_cast<std::uint64_t>(
-      std::chrono::duration_cast<std::chrono::microseconds>(
-          clock::now().time_since_epoch())
-          .count());
-}
 
 cache::RedisObject ApplyStringDeadline(cache::RedisObject object,
                                        std::uint64_t deadline_us,
@@ -185,14 +176,7 @@ std::optional<std::string> ComputeDeadline(std::string_view option,
     }
   }
 
-  const std::uint64_t wall_now_us = UnixTimeMicros();
-  if (absolute_us <= wall_now_us) {
-    *deadline_us = now_us;
-    return std::nullopt;
-  }
-  if (!CheckedAdd(now_us, absolute_us - wall_now_us, deadline_us)) {
-    return std::string(kInvalidExpireError);
-  }
+  *deadline_us = absolute_us;
   return std::nullopt;
 }
 
@@ -252,7 +236,7 @@ std::optional<std::string> ParseSetOptions(
   return std::nullopt;
 }
 
-CommandResult ExecIntegerMutation(
+protocol::Response ExecIntegerMutation(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us, std::int64_t operand,
     IntegerMutationMode mode) {
@@ -299,15 +283,15 @@ CommandResult ExecIntegerMutation(
       MakeRecord(args[0], args), now_us);
 
   if (wrong_type) {
-    return CommandResult{protocol::Response::Error(kWrongTypeError)};
+    return protocol::Response::Error(kWrongTypeError);
   }
   if (invalid_integer) {
-    return CommandResult{protocol::Response::Error(kIntegerError)};
+    return protocol::Response::Error(kIntegerError);
   }
   if (overflow) {
-    return CommandResult{protocol::Response::Error(kOverflowError)};
+    return protocol::Response::Error(kOverflowError);
   }
-  return CommandResult{protocol::Response::Integer(next_value)};
+  return protocol::Response::Integer(next_value);
 }
 
 }  // namespace
@@ -323,15 +307,9 @@ std::optional<std::string> SetCmd::CheckArity(
 protocol::Response SetCmd::ExecCmd(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
-  return ExecWithResult(args, engine, now_us).response;
-}
-
-CommandResult SetCmd::ExecWithResult(
-    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-    std::uint64_t now_us) const {
   SetOptions options;
   if (auto error = ParseSetOptions(args, now_us, &options)) {
-    return CommandResult{protocol::Response::Error(*error)};
+    return protocol::Response::Error(*error);
   }
 
   bool wrong_type = false;
@@ -365,21 +343,21 @@ CommandResult SetCmd::ExecWithResult(
         return ApplyStringDeadline(std::move(object), options.deadline_us,
                                    options.keep_ttl, existing_deadline);
       },
-      MakeRecord("SET", args, cache::BinlogOp::kSet), now_us);
+      MakeRecord("SET", args), now_us);
 
   if (wrong_type) {
-    return CommandResult{protocol::Response::Error(kWrongTypeError)};
+    return protocol::Response::Error(kWrongTypeError);
   }
   if (options.get) {
     if (condition_failed || !old_value.has_value()) {
-      return CommandResult{protocol::Response::NullBulk()};
+      return protocol::Response::NullBulk();
     }
-    return CommandResult{protocol::Response::BulkString(*old_value)};
+    return protocol::Response::BulkString(*old_value);
   }
   if (!wrote) {
-    return CommandResult{protocol::Response::NullBulk()};
+    return protocol::Response::NullBulk();
   }
-  return CommandResult{protocol::Response::SimpleString("OK")};
+  return protocol::Response::SimpleString("OK");
 }
 
 std::optional<std::string> GetCmd::CheckArity(
@@ -438,12 +416,6 @@ std::optional<std::string> SetNxCmd::CheckArity(
 protocol::Response SetNxCmd::ExecCmd(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
-  return ExecWithResult(args, engine, now_us).response;
-}
-
-CommandResult SetNxCmd::ExecWithResult(
-    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-    std::uint64_t now_us) const {
   bool set = false;
   engine.Update(
       args[1],
@@ -456,7 +428,7 @@ CommandResult SetNxCmd::ExecWithResult(
         return cache::RedisObject::MakeString(args[2]);
       },
       MakeRecord("SETNX", args), now_us);
-  return CommandResult{protocol::Response::Integer(set ? 1 : 0)};
+  return protocol::Response::Integer(set ? 1 : 0);
 }
 
 std::optional<std::string> GetSetCmd::CheckArity(
@@ -468,12 +440,6 @@ std::optional<std::string> GetSetCmd::CheckArity(
 }
 
 protocol::Response GetSetCmd::ExecCmd(
-    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-    std::uint64_t now_us) const {
-  return ExecWithResult(args, engine, now_us).response;
-}
-
-CommandResult GetSetCmd::ExecWithResult(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
   bool wrong_type = false;
@@ -495,12 +461,12 @@ CommandResult GetSetCmd::ExecWithResult(
       MakeRecord("GETSET", args), now_us);
 
   if (wrong_type) {
-    return CommandResult{protocol::Response::Error(kWrongTypeError)};
+    return protocol::Response::Error(kWrongTypeError);
   }
   if (!old_value.has_value()) {
-    return CommandResult{protocol::Response::NullBulk()};
+    return protocol::Response::NullBulk();
   }
-  return CommandResult{protocol::Response::BulkString(*old_value)};
+  return protocol::Response::BulkString(*old_value);
 }
 
 std::optional<std::string> StrLenCmd::CheckArity(
@@ -536,12 +502,6 @@ std::optional<std::string> AppendCmd::CheckArity(
 protocol::Response AppendCmd::ExecCmd(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
-  return ExecWithResult(args, engine, now_us).response;
-}
-
-CommandResult AppendCmd::ExecWithResult(
-    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-    std::uint64_t now_us) const {
   bool wrong_type = false;
   std::int64_t length = 0;
   engine.Update(
@@ -570,9 +530,9 @@ CommandResult AppendCmd::ExecWithResult(
       MakeRecord("APPEND", args), now_us);
 
   if (wrong_type) {
-    return CommandResult{protocol::Response::Error(kWrongTypeError)};
+    return protocol::Response::Error(kWrongTypeError);
   }
-  return CommandResult{protocol::Response::Integer(length)};
+  return protocol::Response::Integer(length);
 }
 
 std::optional<std::string> IncrCmd::CheckArity(
@@ -584,12 +544,6 @@ std::optional<std::string> IncrCmd::CheckArity(
 }
 
 protocol::Response IncrCmd::ExecCmd(
-    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-    std::uint64_t now_us) const {
-  return ExecWithResult(args, engine, now_us).response;
-}
-
-CommandResult IncrCmd::ExecWithResult(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
   return ExecIntegerMutation(args, engine, now_us, 1, IntegerMutationMode::kAdd);
@@ -604,12 +558,6 @@ std::optional<std::string> DecrCmd::CheckArity(
 }
 
 protocol::Response DecrCmd::ExecCmd(
-    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-    std::uint64_t now_us) const {
-  return ExecWithResult(args, engine, now_us).response;
-}
-
-CommandResult DecrCmd::ExecWithResult(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
   return ExecIntegerMutation(args, engine, now_us, 1,
@@ -627,15 +575,9 @@ std::optional<std::string> IncrByCmd::CheckArity(
 protocol::Response IncrByCmd::ExecCmd(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
-  return ExecWithResult(args, engine, now_us).response;
-}
-
-CommandResult IncrByCmd::ExecWithResult(
-    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-    std::uint64_t now_us) const {
   std::int64_t delta = 0;
   if (!ParseIntegerString(args[2], &delta)) {
-    return CommandResult{protocol::Response::Error(kIntegerError)};
+    return protocol::Response::Error(kIntegerError);
   }
   return ExecIntegerMutation(args, engine, now_us, delta,
                              IntegerMutationMode::kAdd);
@@ -652,15 +594,9 @@ std::optional<std::string> DecrByCmd::CheckArity(
 protocol::Response DecrByCmd::ExecCmd(
     const std::vector<std::string_view>& args, cache::CacheEngine& engine,
     std::uint64_t now_us) const {
-  return ExecWithResult(args, engine, now_us).response;
-}
-
-CommandResult DecrByCmd::ExecWithResult(
-    const std::vector<std::string_view>& args, cache::CacheEngine& engine,
-    std::uint64_t now_us) const {
   std::int64_t amount = 0;
   if (!ParseIntegerString(args[2], &amount)) {
-    return CommandResult{protocol::Response::Error(kIntegerError)};
+    return protocol::Response::Error(kIntegerError);
   }
   return ExecIntegerMutation(args, engine, now_us, amount,
                              IntegerMutationMode::kSubtract);

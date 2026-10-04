@@ -7,8 +7,7 @@
 
 namespace repl {
 
-std::string EncodeSnapshotPayload(const cache::ObjectMap& map,
-                                  std::uint64_t now_us);
+std::string EncodeSnapshotPayload(const cache::ObjectMap& map);
 std::optional<cache::ObjectMap> DecodeSnapshotPayload(
     std::string_view payload);
 
