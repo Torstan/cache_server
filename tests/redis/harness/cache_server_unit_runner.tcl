@@ -51,6 +51,9 @@ proc setup_for_file {file} {
 
 proc setup_for_test {name} {
     switch -- $name {
+        {INCR against non existing key} {
+            r del novar
+        }
         {EXPIRE - It should be still possible to read 'x'} {
             r set x foobar
         }

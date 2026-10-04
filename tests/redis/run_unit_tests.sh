@@ -2,31 +2,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SERVER="${ROOT}/build/cache_server"
-PORT="${CACHE_SERVER_REDIS_UNIT_PORT:-6399}"
-HOST="127.0.0.1"
-
-if [[ ! -x "${SERVER}" ]]; then
-  echo "missing ${SERVER}; build cache_server first" >&2
+if [[ $# -ne 0 && $# -ne 2 ]]; then
+  echo "usage: $0 [host port]" >&2
   exit 2
 fi
 
-"${SERVER}" "${PORT}" 1 64 &
-SERVER_PID=$!
-cleanup() {
-  kill "${SERVER_PID}" 2>/dev/null || true
-  wait "${SERVER_PID}" 2>/dev/null || true
-}
-trap cleanup EXIT
-
-for _ in $(seq 1 50); do
-  if (exec 3<>"/dev/tcp/${HOST}/${PORT}") 2>/dev/null; then
-    exec 3<&-
-    exec 3>&-
-    break
-  fi
-  sleep 0.1
-done
+HOST="${1:-${CACHE_SERVER_REDIS_UNIT_HOST:-127.0.0.1}}"
+PORT="${2:-${CACHE_SERVER_REDIS_UNIT_PORT:-6399}}"
 
 TEST_FILES=()
 while IFS= read -r test_file; do
